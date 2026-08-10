@@ -1,0 +1,247 @@
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+from app.main import app
+from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
+from app.schemas.notifications import ActionResultPayload, InitialNotificationPayload
+from app.services.n8n_service import N8nActionWebhookError, N8nService
+
+client = TestClient(app)
+
+INITIAL_PAYLOAD = {
+    "eventId": "evt-123",
+    "eventType": "initial_notification",
+    "riskId": "RSK-OP-0821",
+    "destination": {"teamId": "TEAM_ID", "channelId": "CHANNEL_ID"},
+    "notification": {
+        "riskId": "RSK-OP-0821",
+        "title": "Owner funding is short",
+        "vessel": {"id": "V-OP-2417", "name": "MV Ocean Pioneer"},
+        "severity": "high",
+        "summary": "The owner needs to send US$210,000 more by 15 August 2026.",
+        "deadline": "2026-08-15",
+        "actions": [
+            {"key": "view_details", "label": "View Details"},
+            {"key": "mitigation_plan", "label": "Mitigation Plan"},
+            {"key": "assign", "label": "Assign To"},
+            {"key": "track_risk", "label": "Track This Problem"},
+        ],
+    },
+}
+
+ACTION_RESULT_PAYLOAD = {
+    "eventId": "evt-456",
+    "eventType": "risk_action_result",
+    "riskId": "RSK-OP-0821",
+    "actionKey": "view_details",
+    "destination": {"teamId": "TEAM_ID", "channelId": "CHANNEL_ID"},
+    "result": {
+        "riskId": "RSK-OP-0821",
+        "actionKey": "view_details",
+        "cardType": "risk_details",
+        "data": {},
+    },
+}
+
+
+# ---------- Schema validation ----------
+
+
+def test_initial_notification_payload_parses():
+    payload = InitialNotificationPayload.model_validate(INITIAL_PAYLOAD)
+    assert payload.risk_id == "RSK-OP-0821"
+    assert payload.destination.team_id == "TEAM_ID"
+    assert len(payload.notification.actions) == 4
+
+
+def test_initial_notification_payload_missing_destination_fails():
+    bad = {k: v for k, v in INITIAL_PAYLOAD.items() if k != "destination"}
+    with pytest.raises(ValidationError):
+        InitialNotificationPayload.model_validate(bad)
+
+
+def test_action_result_payload_parses():
+    payload = ActionResultPayload.model_validate(ACTION_RESULT_PAYLOAD)
+    assert payload.action_key == "view_details"
+    assert payload.result.card_type.value == "risk_details"
+
+
+def test_action_result_payload_unknown_card_type_fails():
+    bad = {
+        **ACTION_RESULT_PAYLOAD,
+        "result": {**ACTION_RESULT_PAYLOAD["result"], "cardType": "not_a_real_type"},
+    }
+    with pytest.raises(ValidationError):
+        ActionResultPayload.model_validate(bad)
+
+
+def test_risk_action_event_wire_format():
+    event = RiskActionEvent(
+        eventId="evt-1",
+        riskId="RSK-1",
+        actionKey="view_details",
+        destination=ActionDestination(teamId="T1", channelId="C1"),
+        actor=ActionActor(id="u1", name="Jane Doe", aadObjectId="aad-1"),
+        payload={},
+    )
+    wire = event.to_wire_dict()
+    assert wire["eventId"] == "evt-1"
+    assert wire["destination"]["teamId"] == "T1"
+    assert wire["actor"]["aadObjectId"] == "aad-1"
+
+
+# ---------- n8n service ----------
+
+
+@pytest.mark.asyncio
+async def test_n8n_service_success(monkeypatch):
+    mock_response = httpx.Response(200, json={"ok": True})
+
+    async def fake_post(self, url, json=None, headers=None):
+        return mock_response
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    service = N8nService()
+    event = RiskActionEvent(
+        eventId="evt-1",
+        riskId="RSK-1",
+        actionKey="view_details",
+        destination=ActionDestination(teamId="T1", channelId="C1"),
+        actor=ActionActor(),
+        payload={},
+    )
+    await service.send_action_event(event)  # should not raise
+
+
+@pytest.mark.asyncio
+async def test_n8n_service_non_2xx_raises(monkeypatch):
+    mock_response = httpx.Response(500, json={"error": "boom"})
+
+    async def fake_post(self, url, json=None, headers=None):
+        return mock_response
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    service = N8nService()
+    event = RiskActionEvent(
+        eventId="evt-1",
+        riskId="RSK-1",
+        actionKey="view_details",
+        destination=ActionDestination(teamId="T1", channelId="C1"),
+        actor=ActionActor(),
+        payload={},
+    )
+    with pytest.raises(N8nActionWebhookError):
+        await service.send_action_event(event)
+
+
+@pytest.mark.asyncio
+async def test_n8n_service_network_failure_raises(monkeypatch):
+    async def fake_post(self, url, json=None, headers=None):
+        raise httpx.ConnectError("boom", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    service = N8nService()
+    event = RiskActionEvent(
+        eventId="evt-1",
+        riskId="RSK-1",
+        actionKey="view_details",
+        destination=ActionDestination(teamId="T1", channelId="C1"),
+        actor=ActionActor(),
+        payload={},
+    )
+    with pytest.raises(N8nActionWebhookError):
+        await service.send_action_event(event)
+
+
+# ---------- POST /api/notifications (Teams sender mocked) ----------
+
+
+def test_notifications_initial_success(monkeypatch):
+    mock_send = AsyncMock(return_value="msg-123")
+    monkeypatch.setattr(
+        "app.services.notification_service.send_to_channel", mock_send
+    )
+
+    response = client.post("/api/notifications", json=INITIAL_PAYLOAD)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["eventId"] == "evt-123"
+    assert body["riskId"] == "RSK-OP-0821"
+    mock_send.assert_awaited_once()
+
+
+def test_notifications_action_result_success(monkeypatch):
+    mock_send = AsyncMock(return_value="msg-456")
+    monkeypatch.setattr(
+        "app.services.notification_service.send_to_channel", mock_send
+    )
+
+    response = client.post("/api/notifications", json=ACTION_RESULT_PAYLOAD)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["eventId"] == "evt-456"
+    mock_send.assert_awaited_once()
+
+
+def test_notifications_missing_destination_returns_400():
+    bad = {k: v for k, v in INITIAL_PAYLOAD.items() if k != "destination"}
+    response = client.post("/api/notifications", json=bad)
+    assert response.status_code == 400
+
+
+def test_notifications_unknown_card_type_returns_400():
+    bad = {
+        **ACTION_RESULT_PAYLOAD,
+        "result": {**ACTION_RESULT_PAYLOAD["result"], "cardType": "not_a_real_type"},
+    }
+    response = client.post("/api/notifications", json=bad)
+    assert response.status_code == 400
+
+
+def test_notifications_channel_not_registered_returns_404(monkeypatch):
+    from app.bot.proactive_sender import ChannelNotRegisteredError
+
+    async def raise_not_registered(*args, **kwargs):
+        raise ChannelNotRegisteredError(
+            "Bot is not installed or channel conversation is not registered."
+        )
+
+    monkeypatch.setattr(
+        "app.services.notification_service.send_to_channel", raise_not_registered
+    )
+
+    response = client.post("/api/notifications", json=INITIAL_PAYLOAD)
+    assert response.status_code == 404
+
+
+def test_notifications_internal_api_key_required(monkeypatch):
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("INTERNAL_API_KEY", "secret-key")
+    get_settings.cache_clear()
+
+    try:
+        response = client.post("/api/notifications", json=INITIAL_PAYLOAD)
+        assert response.status_code == 401
+
+        response = client.post(
+            "/api/notifications",
+            json=INITIAL_PAYLOAD,
+            headers={"X-Internal-API-Key": "wrong"},
+        )
+        assert response.status_code == 401
+    finally:
+        monkeypatch.delenv("INTERNAL_API_KEY", raising=False)
+        get_settings.cache_clear()

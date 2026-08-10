@@ -1,0 +1,24 @@
+# Web framework
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+
+# HTTP client (n8n webhook calls)
+httpx==0.28.1
+
+# Data validation
+pydantic==2.13.4
+pydantic-settings==2.15.0
+
+# Environment loading
+python-dotenv==1.2.2
+
+# Current Microsoft-supported Teams SDK: Microsoft 365 Agents SDK for Python
+microsoft-agents-activity==1.3.0
+microsoft-agents-hosting-core==1.3.0
+microsoft-agents-hosting-fastapi==1.3.0
+microsoft-agents-hosting-teams==1.3.0
+microsoft-agents-authentication-msal==1.3.0
+
+# Testing
+pytest==9.1.1
+pytest-asyncio==1.4.0
