@@ -132,105 +132,117 @@ def register_handlers() -> None:
 
     @agent_app.activity(ActivityTypes.invoke)
     async def on_invoke(context: TurnContext, state: TurnState) -> None:
-        activity = context.activity
+        await handle_invoke(context, state)
 
-        if activity.name != ADAPTIVE_CARD_ACTION_NAME:
-            # Not an Adaptive Card action (could be sign-in, task/fetch,
-            # etc. from other Teams features) - nothing for this bot to do.
-            await context.send_activity(
-                _invoke_response_activity(InvokeResponse(status=200))
-            )
-            return
 
-        action_value = activity.value or {}
-        action = action_value.get("action") or {}
-        data = action.get("data") or {}
+async def handle_invoke(context: TurnContext, state: TurnState) -> None:
+    """Process an invoke activity and send its synchronous SDK response."""
+    activity = context.activity
 
-        risk_id = data.get("riskId")
-        action_key = data.get("actionKey")
-
-        if not risk_id or not action_key:
-            log_event(
-                logger,
-                "Adaptive Card action missing riskId/actionKey",
-                level=30,
-            )
-            await context.send_activity(
-                _invoke_response_activity(
-                    InvokeResponse(
-                        status=200,
-                        body=AdaptiveCardInvokeResponse(
-                            status_code=400,
-                            type="application/vnd.microsoft.error",
-                            value={"message": "Missing riskId or actionKey"},
-                        ),
-                    )
-                )
-            )
-            return
-
-        idempotency_key = f"{activity.id}:{risk_id}:{action_key}"
-        if idempotency_store.seen_recently(idempotency_key):
-            log_event(
-                logger,
-                "Duplicate Teams action ignored",
-                risk_id=risk_id,
-                action_key=action_key,
-            )
-            await context.send_activity(
-                _invoke_response_activity(
-                    InvokeResponse(
-                        status=200,
-                        body=AdaptiveCardInvokeResponse(
-                            status_code=200,
-                            type="application/vnd.microsoft.activity.message",
-                            value={"message": "Already processing this action."},
-                        ),
-                    )
-                )
-            )
-            return
-
-        event = RiskActionEvent(
-            event_id=str(uuid.uuid4()),
-            risk_id=risk_id,
-            action_key=action_key,
-            destination=_extract_destination(context),
-            actor=_extract_actor(context),
-            payload={k: v for k, v in data.items() if k not in ("riskId", "actionKey")},
+    if activity.name != ADAPTIVE_CARD_ACTION_NAME:
+        # Not an Adaptive Card action (could be sign-in, task/fetch,
+        # etc. from other Teams features) - nothing for this bot to do.
+        await context.send_activity(
+            _invoke_response_activity(InvokeResponse(status=200))
         )
+        return
 
+    action_value = activity.value or {}
+    action = action_value.get("action") or {}
+    data = action.get("data") or {}
+
+    risk_id = data.get("riskId")
+    action_key = data.get("actionKey")
+
+    if not risk_id or not action_key:
         log_event(
             logger,
-            "Forwarding Teams action to n8n",
-            event_id=event.event_id,
-            risk_id=risk_id,
-            action_key=action_key,
+            "Adaptive Card action missing riskId/actionKey",
+            level=30,
         )
-
-        try:
-            await n8n_service.send_action_event(event)
-            response_value = "Got it - working on your request."
-            status_code = 200
-        except N8nActionWebhookError:
-            response_value = "Sorry, we couldn't reach the automation service. Please try again."
-            status_code = 502
-
         await context.send_activity(
             _invoke_response_activity(
                 InvokeResponse(
                     status=200,
-                    body=AdaptiveCardInvokeResponse(
-                        status_code=status_code,
-                        type="application/vnd.microsoft.activity.message",
-                        value={"message": response_value},
+                    body=_adaptive_card_response(
+                        status_code=400,
+                        type="application/vnd.microsoft.error",
+                        value={"message": "Missing riskId or actionKey"},
                     ),
                 )
             )
         )
+        return
+
+    idempotency_key = f"{activity.id}:{risk_id}:{action_key}"
+    if idempotency_store.seen_recently(idempotency_key):
+        log_event(
+            logger,
+            "Duplicate Teams action ignored",
+            risk_id=risk_id,
+            action_key=action_key,
+        )
+        await context.send_activity(
+            _invoke_response_activity(
+                InvokeResponse(
+                    status=200,
+                    body=_adaptive_card_response(
+                        status_code=200,
+                        type="application/vnd.microsoft.activity.message",
+                        value={"message": "Already processing this action."},
+                    ),
+                )
+            )
+        )
+        return
+
+    event = RiskActionEvent(
+        event_id=str(uuid.uuid4()),
+        risk_id=risk_id,
+        action_key=action_key,
+        destination=_extract_destination(context),
+        actor=_extract_actor(context),
+        payload={k: v for k, v in data.items() if k not in ("riskId", "actionKey")},
+    )
+
+    log_event(
+        logger,
+        "Forwarding Teams action to n8n",
+        event_id=event.event_id,
+        risk_id=risk_id,
+        action_key=action_key,
+    )
+
+    try:
+        await n8n_service.send_action_event(event)
+        response_value = "Got it - working on your request."
+        status_code = 200
+    except N8nActionWebhookError:
+        response_value = "Sorry, we couldn't reach the automation service. Please try again."
+        status_code = 502
+
+    await context.send_activity(
+        _invoke_response_activity(
+            InvokeResponse(
+                status=200,
+                body=_adaptive_card_response(
+                    status_code=status_code,
+                    type="application/vnd.microsoft.activity.message",
+                    value={"message": response_value},
+                ),
+            )
+        )
+    )
 
 
 def _invoke_response_activity(invoke_response: InvokeResponse):
     from microsoft_agents.activity import Activity
 
     return Activity(type=ActivityTypes.invoke_response, value=invoke_response)
+
+
+def _adaptive_card_response(**kwargs) -> dict:
+    """Return the JSON-ready body required by InvokeResponse in SDK 1.3.0."""
+    return AdaptiveCardInvokeResponse(**kwargs).model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
