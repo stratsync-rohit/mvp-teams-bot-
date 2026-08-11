@@ -67,6 +67,7 @@ def test_all_known_sections_render_in_supplied_order():
     rendered = str(card["body"])
 
     assert card["type"] == "AdaptiveCard"
+    assert card["msteams"]["width"] == "Full"
     for value in ("Summary content", "$84,000", "First impact", "Call supplier", "Alex", "91%", "A1", "Proceed with A1"):
         assert value in rendered
     positions = [rendered.index(f"0{number} ") for number in range(1, 8)]

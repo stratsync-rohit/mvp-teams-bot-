@@ -72,6 +72,7 @@ def new_card(body: list[dict[str, Any]], actions: Optional[list[dict[str, Any]]]
         "type": "AdaptiveCard",
         "$schema": ADAPTIVE_CARD_SCHEMA,
         "version": ADAPTIVE_CARD_VERSION,
+        "msteams": {"width": "Full"},
         "body": body,
     }
     if actions:

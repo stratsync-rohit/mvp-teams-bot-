@@ -43,6 +43,7 @@ def test_build_initial_risk_card_structure():
 
     assert card["type"] == "AdaptiveCard"
     assert card["version"] == "1.5"
+    assert card["msteams"]["width"] == "Full"
     assert len(card["actions"]) == 2
 
     action_keys = {a["data"]["actionKey"] for a in card["actions"]}
