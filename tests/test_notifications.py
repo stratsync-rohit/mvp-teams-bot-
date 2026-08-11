@@ -16,7 +16,13 @@ INITIAL_PAYLOAD = {
     "eventId": "evt-123",
     "eventType": "initial_notification",
     "riskId": "RSK-OP-0821",
-    "destination": {"teamId": "TEAM_ID", "channelId": "CHANNEL_ID"},
+    "destination": {
+        "tenantId": "TENANT_ID",
+        "teamId": "TEAM_ID",
+        "channelId": None,
+        "conversationId": "CONVERSATION_ID",
+        "serviceUrl": "https://smba.trafficmanager.net/apac/",
+    },
     "notification": {
         "riskId": "RSK-OP-0821",
         "title": "Owner funding is short",
@@ -38,7 +44,7 @@ ACTION_RESULT_PAYLOAD = {
     "eventType": "risk_action_result",
     "riskId": "RSK-OP-0821",
     "actionKey": "view_details",
-    "destination": {"teamId": "TEAM_ID", "channelId": "CHANNEL_ID"},
+    "destination": INITIAL_PAYLOAD["destination"],
     "result": {
         "riskId": "RSK-OP-0821",
         "actionKey": "view_details",
@@ -55,6 +61,8 @@ def test_initial_notification_payload_parses():
     payload = InitialNotificationPayload.model_validate(INITIAL_PAYLOAD)
     assert payload.risk_id == "RSK-OP-0821"
     assert payload.destination.team_id == "TEAM_ID"
+    assert payload.destination.channel_id is None
+    assert payload.destination.conversation_id == "CONVERSATION_ID"
     assert len(payload.notification.actions) == 4
 
 
@@ -62,6 +70,36 @@ def test_initial_notification_payload_missing_destination_fails():
     bad = {k: v for k, v in INITIAL_PAYLOAD.items() if k != "destination"}
     with pytest.raises(ValidationError):
         InitialNotificationPayload.model_validate(bad)
+
+
+@pytest.mark.parametrize("required_field", ["conversationId", "serviceUrl"])
+def test_initial_notification_payload_missing_required_conversation_field_fails(
+    required_field,
+):
+    bad = {
+        **INITIAL_PAYLOAD,
+        "destination": {
+            key: value
+            for key, value in INITIAL_PAYLOAD["destination"].items()
+            if key != required_field
+        },
+    }
+    with pytest.raises(ValidationError):
+        InitialNotificationPayload.model_validate(bad)
+
+
+def test_initial_notification_payload_channel_id_may_be_omitted():
+    payload = InitialNotificationPayload.model_validate(
+        {
+            **INITIAL_PAYLOAD,
+            "destination": {
+                key: value
+                for key, value in INITIAL_PAYLOAD["destination"].items()
+                if key != "channelId"
+            },
+        }
+    )
+    assert payload.destination.channel_id is None
 
 
 def test_action_result_payload_parses():
@@ -166,7 +204,7 @@ async def test_n8n_service_network_failure_raises(monkeypatch):
 def test_notifications_initial_success(monkeypatch):
     mock_send = AsyncMock(return_value="msg-123")
     monkeypatch.setattr(
-        "app.services.notification_service.send_to_channel", mock_send
+        "app.services.notification_service.send_to_conversation", mock_send
     )
 
     response = client.post("/api/notifications", json=INITIAL_PAYLOAD)
@@ -177,12 +215,15 @@ def test_notifications_initial_success(monkeypatch):
     assert body["eventId"] == "evt-123"
     assert body["riskId"] == "RSK-OP-0821"
     mock_send.assert_awaited_once()
+    assert mock_send.await_args.kwargs["conversation_id"] == "CONVERSATION_ID"
+    assert mock_send.await_args.kwargs["service_url"].endswith("/apac/")
+    assert "channel_id" not in mock_send.await_args.kwargs
 
 
 def test_notifications_action_result_success(monkeypatch):
     mock_send = AsyncMock(return_value="msg-456")
     monkeypatch.setattr(
-        "app.services.notification_service.send_to_channel", mock_send
+        "app.services.notification_service.send_to_conversation", mock_send
     )
 
     response = client.post("/api/notifications", json=ACTION_RESULT_PAYLOAD)
@@ -198,6 +239,21 @@ def test_notifications_missing_destination_returns_400():
     bad = {k: v for k, v in INITIAL_PAYLOAD.items() if k != "destination"}
     response = client.post("/api/notifications", json=bad)
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("required_field", ["conversationId", "serviceUrl"])
+def test_notifications_missing_required_conversation_field_returns_400(required_field):
+    bad = {
+        **INITIAL_PAYLOAD,
+        "destination": {
+            key: value
+            for key, value in INITIAL_PAYLOAD["destination"].items()
+            if key != required_field
+        },
+    }
+    response = client.post("/api/notifications", json=bad)
+    assert response.status_code == 400
+    assert required_field in response.json()["detail"]
 
 
 def test_notifications_unknown_card_type_returns_400():
@@ -218,7 +274,7 @@ def test_notifications_channel_not_registered_returns_404(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "app.services.notification_service.send_to_channel", raise_not_registered
+        "app.services.notification_service.send_to_conversation", raise_not_registered
     )
 
     response = client.post("/api/notifications", json=INITIAL_PAYLOAD)

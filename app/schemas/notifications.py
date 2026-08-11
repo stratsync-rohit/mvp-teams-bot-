@@ -23,12 +23,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class Destination(BaseModel):
-    """Identifies the Microsoft Teams team/channel a card should be sent to."""
+    """Identifies the existing Microsoft Teams conversation to notify."""
 
     model_config = ConfigDict(populate_by_name=True)
 
+    tenant_id: str = Field(alias="tenantId")
     team_id: str = Field(alias="teamId")
-    channel_id: str = Field(alias="channelId")
+    channel_id: str | None = Field(default=None, alias="channelId")
+    conversation_id: str = Field(alias="conversationId")
+    service_url: str = Field(alias="serviceUrl")
 
 
 class NotificationAction(BaseModel):

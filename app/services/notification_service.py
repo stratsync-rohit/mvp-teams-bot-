@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from app.bot.proactive_sender import ChannelNotRegisteredError, send_to_channel
+from app.bot.proactive_sender import ChannelNotRegisteredError, send_to_conversation
 from app.cards.assignment_card import build_assignment_confirmation_card
 from app.cards.initial_risk_card import build_initial_risk_card
 from app.cards.mitigation_plan_card import build_mitigation_plan_card
@@ -51,8 +51,11 @@ class NotificationService:
         card = build_initial_risk_card(payload.notification)
 
         await self._send(
+            tenant_id=payload.destination.tenant_id,
             team_id=payload.destination.team_id,
             channel_id=payload.destination.channel_id,
+            conversation_id=payload.destination.conversation_id,
+            service_url=payload.destination.service_url,
             card=card,
             event_id=payload.event_id,
             risk_id=payload.risk_id,
@@ -77,8 +80,11 @@ class NotificationService:
         card = builder(payload.result.data)
 
         await self._send(
+            tenant_id=payload.destination.tenant_id,
             team_id=payload.destination.team_id,
             channel_id=payload.destination.channel_id,
+            conversation_id=payload.destination.conversation_id,
+            service_url=payload.destination.service_url,
             card=card,
             event_id=payload.event_id,
             risk_id=payload.risk_id,
@@ -94,14 +100,22 @@ class NotificationService:
     async def _send(
         self,
         *,
+        tenant_id: str,
         team_id: str,
-        channel_id: str,
+        channel_id: str | None,
+        conversation_id: str,
+        service_url: str,
         card: dict[str, Any],
         event_id: str,
         risk_id: str,
     ) -> None:
         try:
-            message_id = await send_to_channel(team_id, channel_id, card)
+            message_id = await send_to_conversation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                service_url=service_url,
+                card=card,
+            )
         except ChannelNotRegisteredError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize any Teams send failure
@@ -113,6 +127,7 @@ class NotificationService:
                 risk_id=risk_id,
                 team_id=team_id,
                 channel_id=channel_id,
+                conversation_id=conversation_id,
             )
             raise TeamsSendError("Failed to send Adaptive Card to Microsoft Teams") from exc
 
@@ -123,6 +138,7 @@ class NotificationService:
             risk_id=risk_id,
             team_id=team_id,
             channel_id=channel_id,
+            conversation_id=conversation_id,
             message_id=message_id,
         )
 

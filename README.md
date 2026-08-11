@@ -144,7 +144,13 @@ curl -X POST http://localhost:3978/api/notifications \
     "eventId": "evt-123",
     "eventType": "initial_notification",
     "riskId": "RSK-OP-0821",
-    "destination": {"teamId": "TEAM_ID", "channelId": "CHANNEL_ID"},
+    "destination": {
+      "tenantId": "TENANT_ID",
+      "teamId": "TEAM_ID",
+      "channelId": null,
+      "conversationId": "19:CONVERSATION_ID@thread.tacv2",
+      "serviceUrl": "https://smba.trafficmanager.net/apac/"
+    },
     "notification": {
       "riskId": "RSK-OP-0821",
       "title": "Owner funding is short",
@@ -181,6 +187,10 @@ Response:
 - `eventType: "risk_action_result"` - render + send a follow-up card, where
   `result.cardType` is one of `risk_details`, `mitigation_plan`,
   `tracking_confirmation`, `assignment_confirmation`.
+- `destination.tenantId`, `destination.conversationId`, and
+  `destination.serviceUrl` are required. `destination.channelId` is nullable
+  and optional; proactive delivery continues the supplied conversation and
+  does not create a new channel conversation.
 
 **bot -> n8n** (`POST $N8N_ACTION_WEBHOOK_URL`), sent whenever a user clicks
 an Adaptive Card button in Teams:
@@ -219,11 +229,9 @@ are outside this repository:
    Team), and package + upload/publish it to your tenant (Teams admin
    center or org app catalog).
 4. **Install the Teams app into the target Team** - this triggers the
-   `conversationUpdate` event this bot listens for, which captures the
-   real `serviceUrl` / `conversationId` needed for proactive messaging into
-   that channel (see `app/services/conversation_service.py`). Without this
-   install step, `POST /api/notifications` will correctly return
-   `404 Bot is not installed or channel conversation is not registered.`
+   `conversationUpdate` event this bot listens for and registers the real
+   `tenantId`, `conversationId`, and `serviceUrl`. n8n must return those
+   registered values in `POST /api/notifications` for proactive delivery.
 5. **Grant the bot's Azure AD app the standard Bot Framework Connector
    permissions** (this is typically handled automatically by the Azure Bot
    resource registration).

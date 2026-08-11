@@ -1,95 +1,75 @@
-"""
-Proactive channel sender.
-
-Sends an Adaptive Card into a specific Microsoft Teams team/channel using
-the current Microsoft 365 Agents SDK ``CloudAdapter.create_conversation``
-mechanism.
-
-CRITICAL: teamId + channelId alone are not enough to reach a channel -
-Teams requires a real, previously-captured ``serviceUrl`` (and tenantId)
-for that channel, obtained from a Teams-sent conversationUpdate event
-when this bot was installed. This module never fabricates that context;
-if it isn't on file, it raises a clean error instead of silently sending
-somewhere else (or failing in an unclear way).
-"""
+"""Send Adaptive Cards proactively to existing Teams conversations."""
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from microsoft_agents.activity import (
     Activity,
     ActivityTypes,
+    ChannelAccount,
     Channels,
-    ConversationParameters,
+    ConversationAccount,
+    ConversationReference,
 )
 from microsoft_agents.hosting.core import TurnContext
 
 from app.bot.teams_bot import adapter
 from app.cards.common import to_attachment
 from app.config import get_settings
-from app.services.conversation_service import conversation_service
 from app.utils.logger import get_logger, log_event
 
 logger = get_logger(__name__)
 
-BOTFRAMEWORK_AUDIENCE = "https://api.botframework.com"
-
-
 class ChannelNotRegisteredError(Exception):
-    """
-    Raised when there is no known Teams conversation reference for the
-    requested teamId + channelId - i.e. the bot is not installed there,
-    or no installation event has been received/stored yet.
-    """
+    """Retained for API compatibility with existing route error handling."""
 
 
-async def send_to_channel(team_id: str, channel_id: str, card: dict[str, Any]) -> str:
-    """
-    Sends an Adaptive Card as a new message into the given Teams channel.
-
-    Returns the new Teams activity (message) ID.
-    """
-    reference = await conversation_service.get_reference(team_id, channel_id)
-    if reference is None:
-        raise ChannelNotRegisteredError(
-            "Bot is not installed or channel conversation is not registered."
-        )
-
+async def send_to_conversation(
+    *,
+    tenant_id: str,
+    conversation_id: str,
+    service_url: str,
+    card: dict[str, Any],
+) -> str:
+    """Send a card into a Teams-provided conversation reference."""
     settings = get_settings()
-
     message_activity = Activity(
         type=ActivityTypes.message,
         attachments=[to_attachment(card)],
     )
-
-    conversation_parameters = ConversationParameters(
-        is_group=True,
-        channel_data={"channel": {"id": channel_id}},
-        activity=message_activity,
-        tenant_id=reference.tenant_id or None,
+    reference = ConversationReference(
+        # SDK 1.3.0 requires both accounts when materializing the continuation
+        # activity. A channel continuation is routed by the conversation ID and
+        # service URL, so the configured bot identity is sufficient here.
+        agent=ChannelAccount(id=settings.MICROSOFT_APP_ID),
+        user=ChannelAccount(id=settings.MICROSOFT_APP_ID),
+        channel_id=Channels.ms_teams,
+        service_url=service_url,
+        conversation=ConversationAccount(
+            id=conversation_id,
+            tenant_id=tenant_id,
+        ),
     )
-
-    new_activity_id: Optional[str] = None
+    continuation_activity = reference.get_continuation_activity()
+    new_activity_id: str | None = None
 
     async def _capture_result(turn_context: TurnContext) -> None:
         nonlocal new_activity_id
-        new_activity_id = turn_context.activity.id
+        response = await turn_context.send_activity(message_activity)
+        new_activity_id = response.id if response else None
 
-    await adapter.create_conversation(
+    await adapter.continue_conversation(
         agent_app_id=settings.MICROSOFT_APP_ID,
-        channel_id=Channels.ms_teams,
-        service_url=reference.service_url,
-        audience=BOTFRAMEWORK_AUDIENCE,
-        conversation_parameters=conversation_parameters,
+        continuation_activity=continuation_activity,
         callback=_capture_result,
     )
 
     log_event(
         logger,
-        "Sent Adaptive Card to Teams channel",
-        team_id=team_id,
-        channel_id=channel_id,
+        "Sent Adaptive Card to Teams conversation",
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
         message_id=new_activity_id,
     )
 
