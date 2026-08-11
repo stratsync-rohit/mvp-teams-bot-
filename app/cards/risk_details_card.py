@@ -15,6 +15,7 @@ from app.cards.common import (
     format_currency,
     format_display_date,
     new_card,
+    severity_color,
     text_block,
 )
 
@@ -24,6 +25,12 @@ def build_risk_details_card(data: dict[str, Any]) -> dict[str, Any]:
     title = data.get("title", "Risk details")
 
     facts: list[tuple[str, str]] = []
+    severity = data.get("severity")
+    vessel = data.get("vessel") or {}
+    if severity:
+        facts.append(("Severity", str(severity).title()))
+    if vessel.get("name"):
+        facts.append(("Vessel", str(vessel["name"])))
     if "fundingShortfall" in data:
         facts.append(
             ("Funding shortfall", format_currency(data["fundingShortfall"]))
@@ -35,11 +42,25 @@ def build_risk_details_card(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("accountRisk"):
         facts.append(("Account risk", str(data["accountRisk"])))
 
-    body: list[dict[str, Any]] = [text_block(title, weight="Bolder", size="Medium")]
+    body: list[dict[str, Any]] = [
+        text_block(
+            title,
+            weight="Bolder",
+            size="Medium",
+            color=severity_color(str(severity)) if severity else None,
+        )
+    ]
     if facts:
         body.append(fact_set(facts))
+    if data.get("summary"):
+        body.append(text_block(str(data["summary"]), spacing="Medium"))
 
-    underlying_exposure = data.get("underlyingExposure") or []
+    details = data.get("details") or {}
+    underlying_exposure = (
+        details.get("underlyingExposure")
+        or data.get("underlyingExposure")
+        or []
+    )
     if underlying_exposure:
         body.append(
             container(
@@ -50,7 +71,7 @@ def build_risk_details_card(data: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    impact = data.get("impact") or []
+    impact = details.get("impact") or data.get("impact") or []
     if impact:
         body.append(
             container(

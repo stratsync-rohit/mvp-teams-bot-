@@ -105,3 +105,58 @@ def test_build_mitigation_plan_card():
     assert "Check the 30-day cash need" in body_text
     assert "Fleet Finance Manager" in body_text
     assert "RSK-OP-0821" in body_text
+
+
+def test_standardized_risk_details_card_isolated_and_handles_empty_arrays():
+    card = build_risk_details_card(
+        {
+            "riskId": "RSK-002",
+            "title": "Vendor delay",
+            "severity": "high",
+            "vessel": {"id": "VSL-002", "name": "MV Pacific Horizon"},
+            "summary": "Payments are approaching due dates.",
+            "details": {
+                "underlyingExposure": ["Four invoices unpaid"],
+                "impact": ["Services may stop"],
+            },
+            "mitigationPlan": {"summary": "must not appear"},
+        }
+    )
+    text = str(card["body"])
+    assert "Vendor delay" in text and "Payments are approaching" in text
+    assert "Four invoices unpaid" in text and "Services may stop" in text
+    assert "must not appear" not in text
+
+    empty = build_risk_details_card(
+        {"details": {"underlyingExposure": [], "impact": []}}
+    )
+    assert empty["type"] == "AdaptiveCard"
+
+
+def test_standardized_mitigation_plan_card_isolated():
+    card = build_mitigation_plan_card(
+        {
+            "riskId": "RSK-002",
+            "title": "Vendor delay",
+            "severity": "high",
+            "vessel": {"name": "MV Pacific Horizon"},
+            "details": {"impact": ["must not appear"]},
+            "mitigationPlan": {
+                "summary": "Protect critical supply",
+                "steps": [
+                    {
+                        "step": 1,
+                        "title": "Contact vendor",
+                        "description": "Agree terms",
+                        "owner": "Finance",
+                        "status": "pending",
+                    }
+                ],
+                "lastUpdated": "2026-08-11",
+            },
+        }
+    )
+    text = str(card["body"])
+    assert "Protect critical supply" in text and "Contact vendor" in text
+    assert "Finance" in text and "pending" in text and "11 Aug 2026" in text
+    assert "must not appear" not in text

@@ -96,10 +96,14 @@ class ActionResult(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    success: bool
     risk_id: str = Field(alias="riskId")
     action_key: str = Field(alias="actionKey")
-    card_type: ActionResultCardType = Field(alias="cardType")
-    data: dict[str, Any] = Field(default_factory=dict)
+    # Kept as a validated, required string instead of an enum so unsupported
+    # future card types reach the dispatcher and produce a clear application
+    # error rather than looking like a malformed transport payload.
+    card_type: str = Field(alias="cardType", min_length=1)
+    data: dict[str, Any]
 
 
 class ActionResultPayload(BaseModel):

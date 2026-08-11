@@ -47,6 +47,7 @@ ACTION_RESULT_PAYLOAD = {
     "actionKey": "view_details",
     "destination": INITIAL_PAYLOAD["destination"],
     "result": {
+        "success": True,
         "riskId": "RSK-OP-0821",
         "actionKey": "view_details",
         "cardType": "risk_details",
@@ -106,13 +107,26 @@ def test_initial_notification_payload_channel_id_may_be_omitted():
 def test_action_result_payload_parses():
     payload = ActionResultPayload.model_validate(ACTION_RESULT_PAYLOAD)
     assert payload.action_key == "view_details"
-    assert payload.result.card_type.value == "risk_details"
+    assert payload.result.card_type == "risk_details"
+    assert payload.result.success is True
+    assert payload.destination.channel_id is None
 
 
-def test_action_result_payload_unknown_card_type_fails():
+def test_action_result_payload_unknown_card_type_reaches_dispatcher():
     bad = {
         **ACTION_RESULT_PAYLOAD,
         "result": {**ACTION_RESULT_PAYLOAD["result"], "cardType": "not_a_real_type"},
+    }
+    payload = ActionResultPayload.model_validate(bad)
+    assert payload.result.card_type == "not_a_real_type"
+
+
+@pytest.mark.parametrize("required_field", ["actionKey", "result"])
+def test_action_result_requires_envelope_fields(required_field):
+    bad = {
+        key: value
+        for key, value in ACTION_RESULT_PAYLOAD.items()
+        if key != required_field
     }
     with pytest.raises(ValidationError):
         ActionResultPayload.model_validate(bad)

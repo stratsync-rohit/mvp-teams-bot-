@@ -18,6 +18,7 @@ from app.cards.mitigation_plan_card import build_mitigation_plan_card
 from app.cards.risk_details_card import build_risk_details_card
 from app.cards.tracking_card import build_tracking_confirmation_card
 from app.schemas.notifications import (
+    ActionResult,
     ActionResultCardType,
     ActionResultPayload,
     InitialNotificationPayload,
@@ -36,12 +37,25 @@ class TeamsSendError(Exception):
     pass
 
 
-_CARD_BUILDERS: dict[ActionResultCardType, Callable[[dict[str, Any]], dict[str, Any]]] = {
-    ActionResultCardType.RISK_DETAILS: build_risk_details_card,
-    ActionResultCardType.MITIGATION_PLAN: build_mitigation_plan_card,
-    ActionResultCardType.TRACKING_CONFIRMATION: build_tracking_confirmation_card,
-    ActionResultCardType.ASSIGNMENT_CONFIRMATION: build_assignment_confirmation_card,
+_CARD_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    ActionResultCardType.RISK_DETAILS.value: build_risk_details_card,
+    ActionResultCardType.MITIGATION_PLAN.value: build_mitigation_plan_card,
+    ActionResultCardType.TRACKING_CONFIRMATION.value: build_tracking_confirmation_card,
+    ActionResultCardType.ASSIGNMENT_CONFIRMATION.value: build_assignment_confirmation_card,
 }
+
+
+def render_action_result_card(result: ActionResult) -> dict[str, Any]:
+    """Dispatch a standardized backend result to its isolated card renderer."""
+    builder = _CARD_BUILDERS.get(result.card_type)
+    if builder is None:
+        log_event(logger, "Unsupported action-result card type", card_type=result.card_type)
+        raise UnsupportedCardTypeError(f"Unsupported cardType: {result.card_type}")
+
+    # riskId belongs to the result envelope. Supplying it as a renderer fallback
+    # preserves the useful footer without imposing a shared shape on data.
+    data = {"riskId": result.risk_id, **result.data}
+    return builder(data)
 
 
 class NotificationService:
@@ -71,13 +85,7 @@ class NotificationService:
     async def handle_action_result(
         self, payload: ActionResultPayload
     ) -> NotificationResponse:
-        builder = _CARD_BUILDERS.get(payload.result.card_type)
-        if builder is None:
-            raise UnsupportedCardTypeError(
-                f"Unsupported cardType: {payload.result.card_type}"
-            )
-
-        card = builder(payload.result.data)
+        card = render_action_result_card(payload.result)
 
         await self._send(
             tenant_id=payload.destination.tenant_id,

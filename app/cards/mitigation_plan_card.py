@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.cards.common import container, new_card, text_block
+from app.cards.common import (
+    container,
+    fact_set,
+    format_display_date,
+    new_card,
+    severity_color,
+    text_block,
+)
 
 
 def _build_step_block(step: dict[str, Any]) -> dict[str, Any]:
@@ -34,19 +41,46 @@ def _build_step_block(step: dict[str, Any]) -> dict[str, Any]:
 def build_mitigation_plan_card(data: dict[str, Any]) -> dict[str, Any]:
     risk_id = data.get("riskId", "")
     title = data.get("title", "")
-    summary = data.get("summary", "")
-    steps = data.get("steps") or []
+    plan = data.get("mitigationPlan") or data
+    summary = plan.get("summary", "")
+    steps = plan.get("steps") or []
+    severity = data.get("severity")
+    vessel = data.get("vessel") or {}
 
     body: list[dict[str, Any]] = [
         text_block("Mitigation Plan", weight="Bolder", size="Medium"),
     ]
     if title:
-        body.append(text_block(title, weight="Bolder", spacing="None"))
+        body.append(
+            text_block(
+                title,
+                weight="Bolder",
+                spacing="None",
+                color=severity_color(str(severity)) if severity else None,
+            )
+        )
+    facts = []
+    if severity:
+        facts.append(("Severity", str(severity).title()))
+    if vessel.get("name"):
+        facts.append(("Vessel", str(vessel["name"])))
+    if facts:
+        body.append(fact_set(facts))
     if summary:
         body.append(text_block(summary, spacing="Small"))
 
     for step in steps:
-        body.append(_build_step_block(step))
+        if isinstance(step, dict):
+            body.append(_build_step_block(step))
+
+    if plan.get("lastUpdated"):
+        body.append(
+            text_block(
+                f"Last updated: {format_display_date(plan['lastUpdated'])}",
+                is_subtle=True,
+                size="Small",
+            )
+        )
 
     body.append(
         container(
