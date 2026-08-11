@@ -200,7 +200,13 @@ an Adaptive Card button in Teams:
   "eventId": "generated-uuid",
   "riskId": "RSK-OP-0821",
   "actionKey": "view_details",
-  "destination": {"teamId": "...", "channelId": "..."},
+  "destination": {
+    "tenantId": "...",
+    "teamId": "...",
+    "channelId": null,
+    "conversationId": "...",
+    "serviceUrl": "https://smba.trafficmanager.net/apac/"
+  },
   "actor": {"id": "...", "name": "...", "aadObjectId": "..."},
   "payload": {}
 }

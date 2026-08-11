@@ -92,12 +92,13 @@ async def register_installation_from_activity(activity) -> bool:
 
 
 def _extract_destination(turn_context: TurnContext) -> ActionDestination:
-    channel_data = turn_context.activity.channel_data or {}
-    team = channel_data.get("team") or {}
-    channel = channel_data.get("channel") or {}
+    context = extract_teams_context(turn_context.activity)
     return ActionDestination(
-        team_id=team.get("id"),
-        channel_id=channel.get("id"),
+        tenant_id=context["tenantId"],
+        team_id=context["teamId"],
+        channel_id=context["channelId"],
+        conversation_id=context["conversationId"],
+        service_url=context["serviceUrl"],
     )
 
 

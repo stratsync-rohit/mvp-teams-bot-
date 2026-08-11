@@ -17,8 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class ActionDestination(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    tenant_id: str = Field(alias="tenantId")
     team_id: Optional[str] = Field(default=None, alias="teamId")
     channel_id: Optional[str] = Field(default=None, alias="channelId")
+    conversation_id: str = Field(alias="conversationId")
+    service_url: str = Field(alias="serviceUrl")
 
 
 class ActionActor(BaseModel):

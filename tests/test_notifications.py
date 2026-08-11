@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.main import app
+from app.bot.activity_handler import _extract_destination
 from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
 from app.schemas.notifications import ActionResultPayload, InitialNotificationPayload
 from app.services.n8n_service import N8nActionWebhookError, N8nService
@@ -122,14 +123,53 @@ def test_risk_action_event_wire_format():
         eventId="evt-1",
         riskId="RSK-1",
         actionKey="view_details",
-        destination=ActionDestination(teamId="T1", channelId="C1"),
+        destination=ActionDestination(
+            tenantId="tenant-1",
+            teamId="T1",
+            channelId=None,
+            conversationId="conversation-1",
+            serviceUrl="https://smba.trafficmanager.net/apac/",
+        ),
         actor=ActionActor(id="u1", name="Jane Doe", aadObjectId="aad-1"),
         payload={},
     )
     wire = event.to_wire_dict()
     assert wire["eventId"] == "evt-1"
-    assert wire["destination"]["teamId"] == "T1"
+    assert wire["riskId"] == "RSK-1"
+    assert wire["actionKey"] == "view_details"
+    assert wire["destination"] == {
+        "tenantId": "tenant-1",
+        "teamId": "T1",
+        "channelId": None,
+        "conversationId": "conversation-1",
+        "serviceUrl": "https://smba.trafficmanager.net/apac/",
+    }
+    assert wire["actor"] == {"id": "u1", "name": "Jane Doe", "aadObjectId": "aad-1"}
+    assert wire["payload"] == {}
     assert wire["actor"]["aadObjectId"] == "aad-1"
+
+
+def test_action_destination_uses_current_activity_context_without_channel_id():
+    activity = type("Activity", (), {})()
+    activity.channel_data = {
+        "tenant": {"id": "tenant-current"},
+        "team": {"id": "team-current"},
+    }
+    activity.conversation = type(
+        "Conversation", (), {"id": "conversation-current", "tenant_id": None}
+    )()
+    activity.service_url = "https://smba.trafficmanager.net/amer/"
+    turn_context = type("TurnContext", (), {"activity": activity})()
+
+    destination = _extract_destination(turn_context).model_dump(by_alias=True)
+
+    assert destination == {
+        "tenantId": "tenant-current",
+        "teamId": "team-current",
+        "channelId": None,
+        "conversationId": "conversation-current",
+        "serviceUrl": "https://smba.trafficmanager.net/amer/",
+    }
 
 
 # ---------- n8n service ----------
@@ -138,8 +178,10 @@ def test_risk_action_event_wire_format():
 @pytest.mark.asyncio
 async def test_n8n_service_success(monkeypatch):
     mock_response = httpx.Response(200, json={"ok": True})
+    captured = {}
 
     async def fake_post(self, url, json=None, headers=None):
+        captured.update({"url": url, "json": json, "headers": headers})
         return mock_response
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
@@ -149,11 +191,31 @@ async def test_n8n_service_success(monkeypatch):
         eventId="evt-1",
         riskId="RSK-1",
         actionKey="view_details",
-        destination=ActionDestination(teamId="T1", channelId="C1"),
-        actor=ActionActor(),
+        destination=ActionDestination(
+            tenantId="tenant-1",
+            teamId="T1",
+            channelId=None,
+            conversationId="conversation-1",
+            serviceUrl="https://smba.trafficmanager.net/apac/",
+        ),
+        actor=ActionActor(id="user-1", name="Jane Doe", aadObjectId="aad-1"),
         payload={},
     )
     await service.send_action_event(event)  # should not raise
+    assert captured["json"] == {
+        "eventId": "evt-1",
+        "riskId": "RSK-1",
+        "actionKey": "view_details",
+        "destination": {
+            "tenantId": "tenant-1",
+            "teamId": "T1",
+            "channelId": None,
+            "conversationId": "conversation-1",
+            "serviceUrl": "https://smba.trafficmanager.net/apac/",
+        },
+        "actor": {"id": "user-1", "name": "Jane Doe", "aadObjectId": "aad-1"},
+        "payload": {},
+    }
 
 
 @pytest.mark.asyncio
@@ -170,7 +232,13 @@ async def test_n8n_service_non_2xx_raises(monkeypatch):
         eventId="evt-1",
         riskId="RSK-1",
         actionKey="view_details",
-        destination=ActionDestination(teamId="T1", channelId="C1"),
+        destination=ActionDestination(
+            tenantId="tenant-1",
+            teamId="T1",
+            channelId="C1",
+            conversationId="conversation-1",
+            serviceUrl="https://smba.trafficmanager.net/apac/",
+        ),
         actor=ActionActor(),
         payload={},
     )
@@ -190,7 +258,13 @@ async def test_n8n_service_network_failure_raises(monkeypatch):
         eventId="evt-1",
         riskId="RSK-1",
         actionKey="view_details",
-        destination=ActionDestination(teamId="T1", channelId="C1"),
+        destination=ActionDestination(
+            tenantId="tenant-1",
+            teamId="T1",
+            channelId="C1",
+            conversationId="conversation-1",
+            serviceUrl="https://smba.trafficmanager.net/apac/",
+        ),
         actor=ActionActor(),
         payload={},
     )
