@@ -37,6 +37,7 @@ _SAFE_FIELDS = (
     "operation",
     "result",
     "status",
+    "section_type",
     "correlation_id",
 )
 

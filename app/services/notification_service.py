@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from app.bot.proactive_sender import ChannelNotRegisteredError, send_to_conversation
 from app.cards.assignment_card import build_assignment_confirmation_card
+from app.cards.dynamic_card import render_dynamic_card
 from app.cards.initial_risk_card import build_initial_risk_card
 from app.cards.mitigation_plan_card import build_mitigation_plan_card
 from app.cards.risk_details_card import build_risk_details_card
@@ -38,6 +39,7 @@ class TeamsSendError(Exception):
 
 
 _CARD_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "dynamic_card": render_dynamic_card,
     ActionResultCardType.RISK_DETAILS.value: build_risk_details_card,
     ActionResultCardType.MITIGATION_PLAN.value: build_mitigation_plan_card,
     ActionResultCardType.TRACKING_CONFIRMATION.value: build_tracking_confirmation_card,
