@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     N8N_ACTION_WEBHOOK_URL: str = ""
     N8N_TIMEOUT_SECONDS: int = 15
 
+    # ---- Backend installation registration ----
+    BACKEND_BASE_URL: str = "http://localhost:8000"
+    BACKEND_TIMEOUT_SECONDS: int = 15
+
     # ---- Internal security ----
     INTERNAL_API_KEY: str = ""
 

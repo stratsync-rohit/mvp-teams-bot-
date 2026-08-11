@@ -10,9 +10,9 @@ This service is **only** the Teams messaging layer:
 - It receives Adaptive Card button clicks from Teams and forwards them to
   the n8n Action Handler webhook.
 
-It does **not** connect to MongoDB, call the backend directly, or contain
-any risk business logic. n8n owns orchestration; the backend owns business
-data.
+It does **not** connect to MongoDB or contain risk business logic. It calls the
+backend only to register a Teams installation using the Microsoft tenant ID;
+n8n owns notification orchestration and the backend owns business data.
 
 ## Tech stack
 
@@ -94,6 +94,9 @@ MICROSOFT_TENANT_ID=
 N8N_ACTION_WEBHOOK_URL=
 N8N_TIMEOUT_SECONDS=15
 
+BACKEND_BASE_URL=http://localhost:8000
+BACKEND_TIMEOUT_SECONDS=15
+
 INTERNAL_API_KEY=
 
 LOG_LEVEL=INFO
@@ -113,6 +116,23 @@ Notes:
 - If `INTERNAL_API_KEY` is set, `POST /api/notifications` requires a
   matching `X-Internal-API-Key` header. If left blank, the endpoint is open
   (intended for local development only).
+
+## Shared-bot client onboarding
+
+Before a client installs the app, create its StratSync account and configure
+its Microsoft tenant mapping in the backend:
+
+```bash
+curl -X PUT http://localhost:8000/api/teams/tenant-mappings/ACC-002 \
+  -H "Content-Type: application/json" \
+  -d '{"tenantId":"CLIENT_TENANT_ID","clientName":"ABC Shipping","enabled":true}'
+```
+
+The client then installs the same Teams app. The bot extracts `tenantId`,
+`teamId`, `channelId`, `conversationId`, and `serviceUrl` from the Teams event
+and registers them without an `accountId`. The backend resolves the account
+from the tenant mapping. An unmapped tenant produces a warning and does not
+interrupt Teams activity processing.
 
 ## Sample `POST /api/notifications` (initial notification)
 

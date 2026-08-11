@@ -6,7 +6,7 @@ Two responsibilities live here:
   1. conversationUpdate handling - captures real Teams conversation
      context (tenantId, teamId, channelId, conversationId, serviceUrl)
      whenever the bot is installed/added to a Team or channel, so we can
-     proactively message that channel later.
+     proactively message that channel later and registers it with the backend.
 
   2. Adaptive Card action handling - Teams delivers Action.Execute button
      clicks as an ``invoke`` activity named ``adaptiveCard/action``. We
@@ -29,15 +29,66 @@ from microsoft_agents.hosting.core import TurnContext, TurnState
 from app.bot.teams_bot import agent_app
 from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
 from app.services.conversation_service import conversation_service
+from app.services.backend_client import register_teams_installation
+from app.config import get_settings
 from app.services.n8n_service import N8nActionWebhookError, N8nService
 from app.storage.idempotency_store import idempotency_store
 from app.utils.logger import get_logger, log_event
+from app.utils.teams_context import extract_teams_context
 
 logger = get_logger(__name__)
 
 n8n_service = N8nService()
 
 ADAPTIVE_CARD_ACTION_NAME = "adaptiveCard/action"
+
+
+async def register_installation_from_activity(activity) -> bool:
+    """Register a valid Team-scoped activity without disrupting its processing."""
+    context = extract_teams_context(activity)
+    if not (
+        context["tenantId"]
+        and context["teamId"]
+        and context["conversationId"]
+        and context["serviceUrl"]
+    ):
+        return False
+
+    settings = get_settings()
+    payload = {
+        **context,
+        "botAppId": settings.MICROSOFT_APP_ID,
+        "enabled": True,
+    }
+    log_event(
+        logger,
+        "teams_installation_received",
+        tenant_id=payload["tenantId"],
+        team_id=payload["teamId"],
+        conversation_id=payload["conversationId"],
+    )
+    try:
+        registered = await register_teams_installation(payload)
+    except Exception as exc:  # registration must never break Teams activity handling
+        log_event(
+            logger,
+            "teams_installation_registration_failed",
+            level=40,
+            tenant_id=payload["tenantId"],
+            team_id=payload["teamId"],
+            conversation_id=payload["conversationId"],
+            error_type=type(exc).__name__,
+        )
+        return False
+    if registered:
+        log_event(
+            logger,
+            "teams_installation_registered",
+            tenant_id=payload["tenantId"],
+            team_id=payload["teamId"],
+            conversation_id=payload["conversationId"],
+        )
+    return registered
 
 
 def _extract_destination(turn_context: TurnContext) -> ActionDestination:
@@ -65,6 +116,7 @@ def register_handlers() -> None:
     @agent_app.activity(ActivityTypes.conversation_update)
     async def on_conversation_update(context: TurnContext, state: TurnState) -> None:
         await conversation_service.capture_from_turn_context(context)
+        await register_installation_from_activity(context.activity)
 
         channel_data = context.activity.channel_data or {}
         team = channel_data.get("team") or {}
