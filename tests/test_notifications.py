@@ -27,16 +27,13 @@ INITIAL_PAYLOAD = {
     "notification": {
         "riskId": "RSK-OP-0821",
         "title": "Owner funding is short",
-        "vessel": {"id": "V-OP-2417", "name": "MV Ocean Pioneer"},
+        "status": "open",
+        "entity": {"type": "sku", "id": "88421", "name": "Lavender Body Mist",
+                   "data": {"anything": [1, 2]}},
         "severity": "high",
         "summary": "The owner needs to send US$210,000 more by 15 August 2026.",
-        "deadline": "2026-08-15",
-        "actions": [
-            {"key": "view_details", "label": "View Details"},
-            {"key": "mitigation_plan", "label": "Mitigation Plan"},
-            {"key": "assign", "label": "Assign To"},
-            {"key": "track_risk", "label": "Track This Problem"},
-        ],
+        "metrics": [{"key": "stock", "label": "Available Stock", "value": False,
+                     "data": {"source": "erp"}}],
     },
 }
 
@@ -65,7 +62,18 @@ def test_initial_notification_payload_parses():
     assert payload.destination.team_id == "TEAM_ID"
     assert payload.destination.channel_id is None
     assert payload.destination.conversation_id == "CONVERSATION_ID"
-    assert len(payload.notification.actions) == 4
+    assert payload.notification.entity.type == "sku"
+    assert payload.notification.metrics[0].value is False
+
+
+def test_legacy_initial_notification_is_normalized():
+    legacy = {**INITIAL_PAYLOAD, "notification": {
+        "riskId": "RSK-OLD", "title": "Old", "severity": "high", "summary": "Legacy",
+        "vessel": {"id": "V-1", "name": "Legacy Vessel"},
+    }}
+    payload = InitialNotificationPayload.model_validate(legacy)
+    assert payload.notification.entity.type == "vessel"
+    assert payload.notification.entity.name == "Legacy Vessel"
 
 
 def test_initial_notification_payload_missing_destination_fails():

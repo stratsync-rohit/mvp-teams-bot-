@@ -15,11 +15,10 @@ data handed to us by n8n so we can turn it into an Adaptive Card.
 
 from __future__ import annotations
 
-from datetime import date
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Destination(BaseModel):
@@ -34,25 +33,23 @@ class Destination(BaseModel):
     service_url: str = Field(alias="serviceUrl")
 
 
-class NotificationAction(BaseModel):
+class InitialEntity(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    type: str
+    id: str | None = None
+    name: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class InitialMetric(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     key: str
     label: str
-
-
-class Vessel(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    id: str
-    name: str
-
-
-class Severity(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+    value: Any
+    status: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class InitialNotificationData(BaseModel):
@@ -60,11 +57,30 @@ class InitialNotificationData(BaseModel):
 
     risk_id: str = Field(alias="riskId")
     title: str
-    vessel: Vessel
-    severity: Severity
+    severity: str
+    status: str = "open"
     summary: str
-    deadline: Optional[date] = None
-    actions: list[NotificationAction] = Field(default_factory=list)
+    entity: InitialEntity
+    metrics: list[InitialMetric] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_initial_payload(cls, value: Any) -> Any:
+        """Adapt the old vessel envelope into the one generic render path."""
+        if not isinstance(value, dict) or "entity" in value:
+            return value
+        vessel = value.get("vessel")
+        if not isinstance(vessel, dict):
+            return value
+        normalized = dict(value)
+        normalized["entity"] = {
+            "type": "vessel",
+            "id": vessel.get("id"),
+            "name": vessel.get("name"),
+            "data": {},
+        }
+        normalized.setdefault("metrics", [])
+        return normalized
 
 
 class InitialNotificationPayload(BaseModel):

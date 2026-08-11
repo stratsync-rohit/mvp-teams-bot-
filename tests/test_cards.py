@@ -1,3 +1,5 @@
+import pytest
+
 from app.cards.common import format_currency, format_display_date
 from app.cards.initial_risk_card import build_initial_risk_card
 from app.cards.mitigation_plan_card import build_mitigation_plan_card
@@ -10,15 +12,16 @@ def _sample_notification() -> InitialNotificationData:
         {
             "riskId": "RSK-OP-0821",
             "title": "Owner funding is short",
-            "vessel": {"id": "V-OP-2417", "name": "MV Ocean Pioneer"},
+            "status": "open",
+            "entity": {"type": "vessel", "id": "V-OP-2417", "name": "MV Ocean Pioneer",
+                       "data": {"arbitrary": True}},
             "severity": "high",
             "summary": "The owner needs to send US$210,000 more by 15 August 2026.",
-            "deadline": "2026-08-15",
-            "actions": [
-                {"key": "view_details", "label": "View Details"},
-                {"key": "mitigation_plan", "label": "Mitigation Plan"},
-                {"key": "assign", "label": "Assign To"},
-                {"key": "track_risk", "label": "Track This Problem"},
+            "metrics": [
+                {"key": "exposure", "label": "ARBITRARY EXPOSURE", "value": 0,
+                 "status": "critical", "data": {}},
+                {"key": "blocked", "label": "IS BLOCKED", "value": False, "data": {}},
+                {"key": "future", "label": "FUTURE METRIC", "value": "custom", "data": {}},
             ],
         }
     )
@@ -62,6 +65,33 @@ def test_build_initial_risk_card_structure():
     assert "V-OP-2417" in body_text
     assert "MV Ocean Pioneer" in body_text
     assert "RSK-OP-0821" in body_text
+    assert "ARBITRARY EXPOSURE" in body_text and "IS BLOCKED" in body_text
+    assert "0" in body_text and "false" in body_text
+    metric_rows = [item for item in card["body"] if item.get("type") == "ColumnSet"]
+    assert [len(row["columns"]) for row in metric_rows[1:]] == [2, 1]
+
+
+@pytest.mark.parametrize("entity_type", ["vessel", "sku", "supplier", "future_asset_type"])
+def test_initial_card_renders_any_entity_type(entity_type):
+    payload = _sample_notification().model_dump(by_alias=True)
+    payload["entity"]["type"] = entity_type
+    card = build_initial_risk_card(InitialNotificationData.model_validate(payload))
+    assert entity_type.replace("_", " ").title() in str(card["body"])
+
+
+@pytest.mark.parametrize("missing", ["id", "name"])
+def test_initial_card_handles_missing_entity_identity(missing):
+    payload = _sample_notification().model_dump(by_alias=True)
+    payload["entity"].pop(missing)
+    assert build_initial_risk_card(InitialNotificationData.model_validate(payload))["type"] == "AdaptiveCard"
+
+
+def test_initial_card_handles_no_metrics_and_unknown_severity():
+    payload = _sample_notification().model_dump(by_alias=True)
+    payload.update(metrics=[], severity="future_priority")
+    card = build_initial_risk_card(InitialNotificationData.model_validate(payload))
+    assert "KEY METRICS" not in str(card["body"])
+    assert "FUTURE_PRIORITY" in str(card["body"])
 
 
 def test_build_risk_details_card():
