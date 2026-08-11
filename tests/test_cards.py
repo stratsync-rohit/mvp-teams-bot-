@@ -40,10 +40,15 @@ def test_build_initial_risk_card_structure():
 
     assert card["type"] == "AdaptiveCard"
     assert card["version"] == "1.5"
-    assert len(card["actions"]) == 4
+    assert len(card["actions"]) == 2
 
     action_keys = {a["data"]["actionKey"] for a in card["actions"]}
-    assert action_keys == {"view_details", "mitigation_plan", "assign", "track_risk"}
+    action_titles = {a["title"] for a in card["actions"]}
+    assert action_keys == {"view_details", "mitigation_plan"}
+    assert "View Details" in action_titles
+    assert "Mitigation Plan" in action_titles
+    assert "Assign To" not in action_titles
+    assert "Track This Problem" not in action_titles
 
     for action in card["actions"]:
         assert action["type"] == "Action.Execute"

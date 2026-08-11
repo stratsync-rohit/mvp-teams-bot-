@@ -22,6 +22,9 @@ from app.cards.common import (
 from app.schemas.notifications import InitialNotificationData
 
 
+INITIAL_RISK_ACTION_KEYS = {"view_details", "mitigation_plan"}
+
+
 def build_initial_risk_card(notification: InitialNotificationData) -> dict[str, Any]:
     header = {
         "type": "ColumnSet",
@@ -71,6 +74,7 @@ def build_initial_risk_card(notification: InitialNotificationData) -> dict[str, 
     actions = [
         risk_action_button(action.label, action.key, notification.risk_id)
         for action in notification.actions
+        if action.key in INITIAL_RISK_ACTION_KEYS
     ]
 
     return new_card(body=body, actions=actions)
