@@ -16,6 +16,16 @@ def sample_activity():
     )
 
 
+def removal_activity(*, tenant_id="tenant-1", team_id="team-1", conversation_id="conversation-1"):
+    return SimpleNamespace(
+        type="installationUpdate",
+        action="remove",
+        channel_data={"tenant": {"id": tenant_id}, "team": {"id": team_id}},
+        conversation=SimpleNamespace(id=conversation_id, tenant_id=tenant_id),
+        service_url="https://smba.trafficmanager.net/emea/",
+    )
+
+
 def test_extract_teams_context_uses_optional_values():
     result = extract_teams_context(sample_activity())
     assert result == {
@@ -72,3 +82,184 @@ async def test_backend_unmapped_tenant_does_not_raise(monkeypatch):
         "teamId": "team-1",
         "conversationId": "conversation-1",
     }) is False
+
+
+@pytest.mark.asyncio
+async def test_removal_forwards_only_teams_context(monkeypatch):
+    captured = {}
+
+    async def disconnect(tenant_id, **kwargs):
+        captured.update(tenant_id=tenant_id, **kwargs)
+        return "disconnected"
+
+    monkeypatch.setattr(activity_handler, "disconnect_teams_installation", disconnect)
+    handled = await activity_handler.disconnect_installation_from_activity(
+        removal_activity(tenant_id="TENANT-A", team_id="TEAM-A", conversation_id="CONV-A")
+    )
+    assert handled is True
+    assert captured == {
+        "tenant_id": "TENANT-A",
+        "team_id": "TEAM-A",
+        "conversation_id": "CONV-A",
+    }
+    assert "accountId" not in captured
+    assert "account_id" not in captured
+
+
+@pytest.mark.asyncio
+async def test_removal_without_team_uses_conversation(monkeypatch):
+    captured = {}
+
+    async def disconnect(tenant_id, **kwargs):
+        captured.update(tenant_id=tenant_id, **kwargs)
+        return "not_found"
+
+    monkeypatch.setattr(activity_handler, "disconnect_teams_installation", disconnect)
+    assert await activity_handler.disconnect_installation_from_activity(
+        removal_activity(team_id=None)
+    ) is True
+    assert captured["team_id"] is None
+    assert captured["conversation_id"] == "conversation-1"
+
+
+@pytest.mark.asyncio
+async def test_removal_backend_failure_does_not_raise(monkeypatch):
+    async def failed_disconnect(*args, **kwargs):
+        raise RuntimeError("backend unavailable")
+
+    monkeypatch.setattr(
+        activity_handler, "disconnect_teams_installation", failed_disconnect
+    )
+    assert await activity_handler.disconnect_installation_from_activity(
+        removal_activity()
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_backend_disconnect_payload_and_internal_key(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"success": True, "disconnected": True}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured.update(url=url, **kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(
+        backend_client,
+        "get_settings",
+        lambda: SimpleNamespace(
+            BACKEND_BASE_URL="https://backend.example",
+            BACKEND_TIMEOUT_SECONDS=5,
+            INTERNAL_API_KEY="test-internal-key",
+        ),
+    )
+    result = await backend_client.disconnect_teams_installation(
+        "TENANT-A", team_id="TEAM-A", conversation_id="CONV-A"
+    )
+    assert result == "disconnected"
+    assert captured["url"].endswith("/api/teams/installations/disconnect")
+    assert captured["json"] == {
+        "tenantId": "TENANT-A",
+        "teamId": "TEAM-A",
+        "conversationId": "CONV-A",
+    }
+    assert captured["headers"] == {"X-Internal-API-Key": "test-internal-key"}
+    assert "accountId" not in captured["json"]
+
+
+@pytest.mark.asyncio
+async def test_backend_disconnect_not_found_is_controlled(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"success": True, "disconnected": False}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(
+        backend_client,
+        "get_settings",
+        lambda: SimpleNamespace(
+            BACKEND_BASE_URL="https://backend.example",
+            BACKEND_TIMEOUT_SECONDS=5,
+            INTERNAL_API_KEY="test-internal-key",
+        ),
+    )
+    assert await backend_client.disconnect_teams_installation(
+        "TENANT-A", conversation_id="CONV-A"
+    ) == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_backend_disconnect_requires_internal_key(monkeypatch):
+    monkeypatch.setattr(
+        backend_client,
+        "get_settings",
+        lambda: SimpleNamespace(INTERNAL_API_KEY=""),
+    )
+    assert await backend_client.disconnect_teams_installation(
+        "TENANT-A", conversation_id="CONV-A"
+    ) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_installation_update_remove_uses_disconnect_flow(monkeypatch):
+    captured = []
+
+    async def disconnect(activity):
+        captured.append(activity.action)
+        return True
+
+    monkeypatch.setattr(
+        activity_handler, "disconnect_installation_from_activity", disconnect
+    )
+    context = SimpleNamespace(activity=removal_activity())
+    await activity_handler.handle_installation_update(context, SimpleNamespace())
+    assert captured == ["remove"]
+
+
+@pytest.mark.asyncio
+async def test_installation_update_add_reuses_registration_flow(monkeypatch):
+    calls = []
+
+    async def capture(context):
+        calls.append("capture")
+
+    async def register(activity):
+        calls.append("register")
+        return True
+
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", register)
+    activity = removal_activity()
+    activity.action = "add"
+    context = SimpleNamespace(activity=activity)
+    await activity_handler.handle_installation_update(context, SimpleNamespace())
+    assert calls == ["capture", "register"]

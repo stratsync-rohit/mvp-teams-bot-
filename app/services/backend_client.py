@@ -1,5 +1,5 @@
-"""Small HTTP client for registering Teams installations with the backend."""
-from typing import Any
+"""Small HTTP client for synchronizing Teams installations with the backend."""
+from typing import Any, Literal
 
 import httpx
 
@@ -7,6 +7,8 @@ from app.config import get_settings
 from app.utils.logger import get_logger, log_event
 
 logger = get_logger(__name__)
+
+TeamsDisconnectResult = Literal["disconnected", "not_found", "failed"]
 
 
 async def register_teams_installation(payload: dict[str, Any]) -> bool:
@@ -42,3 +44,77 @@ async def register_teams_installation(payload: dict[str, Any]) -> bool:
         )
         return False
     return True
+
+
+async def disconnect_teams_installation(
+    tenant_id: str,
+    *,
+    team_id: str | None = None,
+    conversation_id: str | None = None,
+) -> TeamsDisconnectResult:
+    """Soft-disconnect one Teams installation through the backend lifecycle API."""
+    settings = get_settings()
+    safe_context = {
+        "tenant_id": tenant_id,
+        "team_id": team_id,
+        "conversation_id": conversation_id,
+    }
+    if not settings.INTERNAL_API_KEY:
+        log_event(
+            logger,
+            "teams_installation_disconnect_failed",
+            level=40,
+            error_type="InternalApiKeyNotConfigured",
+            **safe_context,
+        )
+        return "failed"
+
+    payload = {"tenantId": tenant_id}
+    if team_id:
+        payload["teamId"] = team_id
+    if conversation_id:
+        payload["conversationId"] = conversation_id
+    if len(payload) == 1:
+        log_event(
+            logger,
+            "teams_installation_disconnect_failed",
+            level=30,
+            error_type="InstallationIdentityMissing",
+            **safe_context,
+        )
+        return "failed"
+
+    url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/installations/disconnect"
+    try:
+        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                url,
+                json=payload,
+                headers={"X-Internal-API-Key": settings.INTERNAL_API_KEY},
+            )
+            response.raise_for_status()
+            body = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log_event(
+            logger,
+            "teams_installation_disconnect_failed",
+            level=40,
+            error_type=type(exc).__name__,
+            **safe_context,
+        )
+        return "failed"
+
+    if body.get("disconnected") is False:
+        log_event(
+            logger,
+            "teams_installation_disconnect_not_found",
+            **safe_context,
+        )
+        return "not_found"
+
+    log_event(
+        logger,
+        "teams_installation_disconnect_succeeded",
+        **safe_context,
+    )
+    return "disconnected"

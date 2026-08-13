@@ -11,8 +11,9 @@ This service is **only** the Teams messaging layer:
   the n8n Action Handler webhook.
 
 It does **not** connect to MongoDB or contain risk business logic. It calls the
-backend only to register a Teams installation using the Microsoft tenant ID;
-n8n owns notification orchestration and the backend owns business data.
+backend to synchronize Teams installation add/remove lifecycle events using the
+Microsoft tenant ID; n8n owns notification orchestration and the backend owns
+business data.
 
 ## Tech stack
 
@@ -34,7 +35,7 @@ teams-bot/
 │   ├── config.py                  Settings + Microsoft 365 Agents SDK auth config
 │   ├── bot/
 │   │   ├── teams_bot.py           CloudAdapter + AgentApplication singletons
-│   │   ├── activity_handler.py    conversationUpdate + Action.Execute handling
+│   │   ├── activity_handler.py    installationUpdate, conversationUpdate, actions
 │   │   └── proactive_sender.py    Proactive send-to-channel
 │   ├── cards/                     Adaptive Card renderers (one per card type)
 │   ├── routers/                   health.py, notifications.py
@@ -133,6 +134,24 @@ The client then installs the same Teams app. The bot extracts `tenantId`,
 and registers them without an `accountId`. The backend resolves the account
 from the tenant mapping. An unmapped tenant produces a warning and does not
 interrupt Teams activity processing.
+
+## Teams installation lifecycle
+
+The Microsoft Agents SDK routes Teams `installationUpdate` activities through
+`AgentApplication.activity(ActivityTypes.installation_update)`:
+
+- `action: add` reuses the existing installation registration path. The existing
+  `conversationUpdate` registration remains available for the Teams add flow.
+- `action: remove` sends `tenantId` and the available `teamId` and/or
+  `conversationId` to `POST /api/teams/installations/disconnect`.
+
+The bot never supplies an `accountId`; the backend resolves the tenant mapping.
+Disconnect requests require `INTERNAL_API_KEY`. If it is missing, the bot logs a
+safe failure and does not make an unauthenticated lifecycle request. Backend
+errors and already-disconnected responses do not crash Teams activity handling.
+
+An uninstall that occurred before this handler was deployed cannot be replayed;
+repair that confirmed stale installation through the backend disconnect API.
 
 ## Sample `POST /api/notifications` (initial notification)
 
@@ -250,5 +269,25 @@ are outside this repository:
 
 ```bash
 docker build -t risk-teams-bot .
-docker run --env-file .env -p 3978:3978 risk-teams-bot
+docker run -d --name risk-teams-bot --restart unless-stopped \
+  --env-file .env -p 3978:3978 risk-teams-bot
+```
+
+For a Teams-bot-only VM redeployment:
+
+```bash
+cd /path/to/MVP/teams-bot
+docker build -t risk-teams-bot .
+docker stop risk-teams-bot
+docker rm risk-teams-bot
+docker run -d --name risk-teams-bot --restart unless-stopped \
+  --env-file .env -p 3978:3978 risk-teams-bot
+curl --fail http://127.0.0.1:3978/health
+```
+
+Verify live lifecycle activity without exposing secrets:
+
+```bash
+docker logs -f risk-teams-bot 2>&1 | grep --line-buffered -E \
+  'teams_app_removal_received|teams_installation_(received|registered|disconnect_)'
 ```

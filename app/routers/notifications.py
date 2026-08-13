@@ -1,14 +1,4 @@
-"""
-POST /api/notifications
 
-Internal endpoint called by n8n workflows. Carries both:
-  * initial_notification payloads (send the Initial Risk Card), and
-  * risk_action_result payloads (send a follow-up card as a NEW message).
-
-Secured with an optional X-Internal-API-Key header (INTERNAL_API_KEY env
-var). If INTERNAL_API_KEY is blank (development only), requests are
-allowed through unauthenticated.
-"""
 
 from __future__ import annotations
 

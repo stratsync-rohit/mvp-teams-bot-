@@ -29,7 +29,10 @@ from microsoft_agents.hosting.core import TurnContext, TurnState
 from app.bot.teams_bot import agent_app
 from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
 from app.services.conversation_service import conversation_service
-from app.services.backend_client import register_teams_installation
+from app.services.backend_client import (
+    disconnect_teams_installation,
+    register_teams_installation,
+)
 from app.config import get_settings
 from app.services.n8n_service import N8nActionWebhookError, N8nService
 from app.storage.idempotency_store import idempotency_store
@@ -91,6 +94,56 @@ async def register_installation_from_activity(activity) -> bool:
     return registered
 
 
+async def disconnect_installation_from_activity(activity) -> bool:
+    """Forward a Teams-issued removal identity without trusting an account ID."""
+    context = extract_teams_context(activity)
+    safe_context = {
+        "tenant_id": context["tenantId"],
+        "team_id": context["teamId"],
+        "conversation_id": context["conversationId"],
+    }
+    log_event(logger, "teams_app_removal_received", **safe_context)
+    if not context["tenantId"] or not (
+        context["teamId"] or context["conversationId"]
+    ):
+        log_event(
+            logger,
+            "teams_installation_disconnect_failed",
+            level=30,
+            error_type="TeamsContextMissing",
+            **safe_context,
+        )
+        return False
+
+    log_event(logger, "teams_installation_disconnect_requested", **safe_context)
+    try:
+        result = await disconnect_teams_installation(
+            context["tenantId"],
+            team_id=context["teamId"],
+            conversation_id=context["conversationId"],
+        )
+    except Exception as exc:  # lifecycle sync must not break activity processing
+        log_event(
+            logger,
+            "teams_installation_disconnect_failed",
+            level=40,
+            error_type=type(exc).__name__,
+            **safe_context,
+        )
+        return False
+    return result in ("disconnected", "not_found")
+
+
+async def handle_installation_update(context: TurnContext, state: TurnState) -> None:
+    """Handle the SDK's installationUpdate add/remove lifecycle activity."""
+    action = (context.activity.action or "").lower()
+    if action == "remove":
+        await disconnect_installation_from_activity(context.activity)
+    elif action == "add":
+        await conversation_service.capture_from_turn_context(context)
+        await register_installation_from_activity(context.activity)
+
+
 def _extract_destination(turn_context: TurnContext) -> ActionDestination:
     context = extract_teams_context(turn_context.activity)
     return ActionDestination(
@@ -114,6 +167,10 @@ def _extract_actor(turn_context: TurnContext) -> ActionActor:
 
 
 def register_handlers() -> None:
+    @agent_app.activity(ActivityTypes.installation_update)
+    async def on_installation_update(context: TurnContext, state: TurnState) -> None:
+        await handle_installation_update(context, state)
+
     @agent_app.activity(ActivityTypes.conversation_update)
     async def on_conversation_update(context: TurnContext, state: TurnState) -> None:
         await conversation_service.capture_from_turn_context(context)
