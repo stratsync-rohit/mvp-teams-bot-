@@ -65,10 +65,15 @@ async def register_installation_from_activity(activity) -> bool:
     }
     log_event(
         logger,
-        "teams_installation_received",
+        "teams_installation_metadata_extracted",
         tenant_id=payload["tenantId"],
         team_id=payload["teamId"],
+        channel_id=payload["channelId"],
         conversation_id=payload["conversationId"],
+        has_channel_name=bool(payload["channelName"]),
+        has_connected_by=bool(
+            payload["connectedById"] or payload["connectedByAadObjectId"]
+        ),
     )
     try:
         registered = await register_teams_installation(payload)
@@ -79,7 +84,12 @@ async def register_installation_from_activity(activity) -> bool:
             level=40,
             tenant_id=payload["tenantId"],
             team_id=payload["teamId"],
+            channel_id=payload["channelId"],
             conversation_id=payload["conversationId"],
+            has_channel_name=bool(payload["channelName"]),
+            has_connected_by=bool(
+                payload["connectedById"] or payload["connectedByAadObjectId"]
+            ),
             error_type=type(exc).__name__,
         )
         return False
@@ -144,6 +154,21 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
         await register_installation_from_activity(context.activity)
 
 
+async def handle_conversation_update(context: TurnContext, state: TurnState) -> None:
+    """Keep the legacy add signal on the shared registration path."""
+    await conversation_service.capture_from_turn_context(context)
+    await register_installation_from_activity(context.activity)
+
+    activity_context = extract_teams_context(context.activity)
+    log_event(
+        logger,
+        "conversationUpdate received",
+        team_id=activity_context["teamId"],
+        channel_id=activity_context["channelId"],
+        tenant_id=activity_context["tenantId"],
+    )
+
+
 def _extract_destination(turn_context: TurnContext) -> ActionDestination:
     context = extract_teams_context(turn_context.activity)
     return ActionDestination(
@@ -173,19 +198,7 @@ def register_handlers() -> None:
 
     @agent_app.activity(ActivityTypes.conversation_update)
     async def on_conversation_update(context: TurnContext, state: TurnState) -> None:
-        await conversation_service.capture_from_turn_context(context)
-        await register_installation_from_activity(context.activity)
-
-        channel_data = context.activity.channel_data or {}
-        team = channel_data.get("team") or {}
-        channel = channel_data.get("channel") or {}
-        log_event(
-            logger,
-            "conversationUpdate received",
-            team_id=team.get("id"),
-            channel_id=channel.get("id"),
-            tenant_id=(context.activity.conversation.tenant_id if context.activity.conversation else None),
-        )
+        await handle_conversation_update(context, state)
 
     @agent_app.activity(ActivityTypes.invoke)
     async def on_invoke(context: TurnContext, state: TurnState) -> None:

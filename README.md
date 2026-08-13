@@ -146,6 +146,15 @@ The Microsoft Agents SDK routes Teams `installationUpdate` activities through
   `conversationId` to `POST /api/teams/installations/disconnect`.
 
 The bot never supplies an `accountId`; the backend resolves the tenant mapping.
+
+Installation registration also forwards optional metadata already present on
+the Teams activity: `channelData.team.name`, `channelData.channel.id`/`name`,
+and the lifecycle activity's `from` account (`id`, `name`, `aadObjectId`). The
+stored `connectedBy*` fields describe the actor Teams attached to that
+connection event; they do not imply administrator, account-owner, or current
+logged-in-user status. Teams may omit channel names and actor details for some
+installation scopes, in which case these fields remain null and no Microsoft
+Graph lookup or fabricated fallback is used.
 Disconnect requests require `INTERNAL_API_KEY`. If it is missing, the bot logs a
 safe failure and does not make an unauthenticated lifecycle request. Backend
 errors and already-disconnected responses do not crash Teams activity handling.

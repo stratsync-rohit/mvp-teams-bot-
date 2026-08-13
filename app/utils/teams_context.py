@@ -14,6 +14,7 @@ def extract_teams_context(activity: Any) -> dict[str, Any]:
     channel = _value(channel_data, "channel") or {}
     tenant = _value(channel_data, "tenant") or {}
     conversation = _value(activity, "conversation")
+    actor = _value(activity, "from_property") or _value(activity, "from")
 
     return {
         "tenantId": _value(tenant, "id") or _value(conversation, "tenant_id")
@@ -24,4 +25,11 @@ def extract_teams_context(activity: Any) -> dict[str, Any]:
         "serviceUrl": _value(activity, "service_url") or _value(activity, "serviceUrl"),
         "teamName": _value(team, "name"),
         "channelName": _value(channel, "name"),
+        # This is the actor attached to the lifecycle activity.  When Teams
+        # supplies it, it represents the user who triggered this connection
+        # event; it is not necessarily an administrator or account owner.
+        "connectedByName": _value(actor, "name"),
+        "connectedById": _value(actor, "id"),
+        "connectedByAadObjectId": _value(actor, "aad_object_id")
+        or _value(actor, "aadObjectId"),
     }

@@ -8,11 +8,21 @@ from app.services import backend_client
 from app.utils.teams_context import extract_teams_context
 
 
-def sample_activity():
+def sample_activity(*, with_metadata=False, with_actor=False):
+    channel_data = {"tenant": {"id": "tenant-1"}, "team": {"id": "team-1"}}
+    if with_metadata:
+        channel_data.update({
+            "team": {"id": "team-1", "name": "Operations"},
+            "channel": {"id": "channel-1", "name": "General"},
+        })
     return SimpleNamespace(
-        channel_data={"tenant": {"id": "tenant-1"}, "team": {"id": "team-1"}},
+        channel_data=channel_data,
         conversation=SimpleNamespace(id="conversation-1", tenant_id="tenant-1"),
         service_url="https://smba.trafficmanager.net/emea/",
+        from_property=(
+            SimpleNamespace(id="teams-user-1", name="Installation Actor", aad_object_id="aad-1")
+            if with_actor else None
+        ),
     )
 
 
@@ -36,7 +46,20 @@ def test_extract_teams_context_uses_optional_values():
         "serviceUrl": "https://smba.trafficmanager.net/emea/",
         "teamName": None,
         "channelName": None,
+        "connectedByName": None,
+        "connectedById": None,
+        "connectedByAadObjectId": None,
     }
+
+
+def test_extracts_real_team_channel_and_activity_actor():
+    result = extract_teams_context(sample_activity(with_metadata=True, with_actor=True))
+    assert result["teamName"] == "Operations"
+    assert result["channelId"] == "channel-1"
+    assert result["channelName"] == "General"
+    assert result["connectedByName"] == "Installation Actor"
+    assert result["connectedById"] == "teams-user-1"
+    assert result["connectedByAadObjectId"] == "aad-1"
 
 
 @pytest.mark.asyncio
@@ -61,6 +84,23 @@ async def test_registration_payload_uses_tenant_without_account(monkeypatch):
     )
     assert await activity_handler.register_installation_from_activity(sample_activity()) is True
     assert captured["tenantId"] == "tenant-1"
+    assert "accountId" not in captured
+
+
+@pytest.mark.asyncio
+async def test_registration_passes_optional_channel_and_actor_metadata(monkeypatch):
+    captured = {}
+
+    async def successful_registration(payload):
+        captured.update(payload)
+        return True
+
+    monkeypatch.setattr(activity_handler, "register_teams_installation", successful_registration)
+    assert await activity_handler.register_installation_from_activity(
+        sample_activity(with_metadata=True, with_actor=True)
+    ) is True
+    assert captured["channelName"] == "General"
+    assert captured["connectedByAadObjectId"] == "aad-1"
     assert "accountId" not in captured
 
 
@@ -262,4 +302,23 @@ async def test_installation_update_add_reuses_registration_flow(monkeypatch):
     activity.action = "add"
     context = SimpleNamespace(activity=activity)
     await activity_handler.handle_installation_update(context, SimpleNamespace())
+    assert calls == ["capture", "register"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_update_reuses_registration_flow(monkeypatch):
+    calls = []
+
+    async def capture(context):
+        calls.append("capture")
+
+    async def register(activity):
+        calls.append("register")
+        return True
+
+    monkeypatch.setattr(activity_handler.conversation_service, "capture_from_turn_context", capture)
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", register)
+    await activity_handler.handle_conversation_update(
+        SimpleNamespace(activity=sample_activity()), SimpleNamespace()
+    )
     assert calls == ["capture", "register"]
