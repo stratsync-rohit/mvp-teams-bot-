@@ -46,6 +46,32 @@ async def register_teams_installation(payload: dict[str, Any]) -> bool:
     return True
 
 
+async def register_teams_destination(payload: dict[str, Any]) -> bool:
+    """Register one observed Teams channel without supplying an account ID."""
+    settings = get_settings()
+    headers = {}
+    if settings.INTERNAL_API_KEY:
+        headers["X-Internal-API-Key"] = settings.INTERNAL_API_KEY
+    url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/channel-destinations"
+    try:
+        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+    except (httpx.HTTPError, ValueError) as exc:
+        log_event(
+            logger,
+            "teams_channel_destination_registration_failed",
+            level=40,
+            tenant_id=payload.get("tenantId"),
+            team_id=payload.get("teamId"),
+            channel_id=payload.get("channelId"),
+            conversation_id=payload.get("conversationId"),
+            error_type=type(exc).__name__,
+        )
+        return False
+    return True
+
+
 async def disconnect_teams_installation(
     tenant_id: str,
     *,

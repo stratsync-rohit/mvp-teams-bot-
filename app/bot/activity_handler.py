@@ -31,6 +31,7 @@ from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
 from app.services.conversation_service import conversation_service
 from app.services.backend_client import (
     disconnect_teams_installation,
+    register_teams_destination,
     register_teams_installation,
 )
 from app.config import get_settings
@@ -118,6 +119,59 @@ async def register_installation_from_activity(activity) -> bool:
     return registered
 
 
+async def capture_channel_destination_from_activity(activity) -> bool:
+    """Register only activity contexts that identify a real Teams channel."""
+    context = extract_teams_context(activity)
+    diagnostic = channel_metadata_diagnostic(activity)
+    if not (
+        context["tenantId"]
+        and context["teamId"]
+        and context["channelId"]
+        and context["conversationId"]
+        and context["serviceUrl"]
+        and (
+            diagnostic["has_channel"]
+            or diagnostic["conversation_type"] == "channel"
+        )
+    ):
+        return False
+
+    payload = {
+        "tenantId": context["tenantId"],
+        "teamId": context["teamId"],
+        "teamName": context["teamName"],
+        "channelId": context["channelId"],
+        "channelName": context["channelName"],
+        "conversationId": context["conversationId"],
+        "serviceUrl": context["serviceUrl"],
+        "connectedByName": context["connectedByName"],
+    }
+    safe_context = {
+        "tenant_id": context["tenantId"],
+        "team_id": context["teamId"],
+        "channel_id": context["channelId"],
+        "conversation_id": context["conversationId"],
+    }
+    log_event(logger, "teams_channel_destination_detected", **safe_context)
+    log_event(
+        logger, "teams_channel_destination_registration_requested", **safe_context
+    )
+    try:
+        registered = await register_teams_destination(payload)
+    except Exception as exc:
+        log_event(
+            logger,
+            "teams_channel_destination_registration_failed",
+            level=40,
+            error_type=type(exc).__name__,
+            **safe_context,
+        )
+        return False
+    if registered:
+        log_event(logger, "teams_channel_destination_registered", **safe_context)
+    return registered
+
+
 async def disconnect_installation_from_activity(activity) -> bool:
     """Forward a Teams-issued removal identity without trusting an account ID."""
     context = extract_teams_context(activity)
@@ -166,12 +220,14 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
     elif action == "add":
         await conversation_service.capture_from_turn_context(context)
         await register_installation_from_activity(context.activity)
+        await capture_channel_destination_from_activity(context.activity)
 
 
 async def handle_conversation_update(context: TurnContext, state: TurnState) -> None:
     """Keep the legacy add signal on the shared registration path."""
     await conversation_service.capture_from_turn_context(context)
     await register_installation_from_activity(context.activity)
+    await capture_channel_destination_from_activity(context.activity)
 
     activity_context = extract_teams_context(context.activity)
     log_event(
@@ -213,6 +269,10 @@ def register_handlers() -> None:
     @agent_app.activity(ActivityTypes.conversation_update)
     async def on_conversation_update(context: TurnContext, state: TurnState) -> None:
         await handle_conversation_update(context, state)
+
+    @agent_app.activity(ActivityTypes.message)
+    async def on_message(context: TurnContext, state: TurnState) -> None:
+        await capture_channel_destination_from_activity(context.activity)
 
     @agent_app.activity(ActivityTypes.invoke)
     async def on_invoke(context: TurnContext, state: TurnState) -> None:

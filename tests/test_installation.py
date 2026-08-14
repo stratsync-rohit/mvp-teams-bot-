@@ -398,6 +398,7 @@ async def test_lifecycle_registration_payload_includes_resolved_channel_name(
         activity_handler.conversation_service, "capture_from_turn_context", capture
     )
     monkeypatch.setattr(activity_handler, "register_teams_installation", register)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = conversation_named_channel_activity()
     if lifecycle == "installation":
         activity.action = "add"
@@ -414,3 +415,102 @@ async def test_lifecycle_registration_payload_includes_resolved_channel_name(
     assert captured["conversationId"] == "conversation-1"
     assert "accountId" not in captured
     assert "routeKey" not in captured
+
+
+@pytest.mark.asyncio
+async def test_sales_and_dev_channel_activities_register_separate_destinations(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return True
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    for channel_id, channel_name in (("SALES-ID", "Sales"), ("DEV-ID", "Dev")):
+        activity = sample_activity(with_metadata=True)
+        activity.channel_data["channel"] = {"id": channel_id, "name": channel_name}
+        activity.conversation = SimpleNamespace(
+            id=f"conversation-{channel_id}",
+            tenant_id="tenant-1",
+            conversation_type="channel",
+            name=channel_name,
+        )
+        assert await activity_handler.capture_channel_destination_from_activity(activity)
+
+    assert [item["channelId"] for item in captured] == ["SALES-ID", "DEV-ID"]
+    assert [item["channelName"] for item in captured] == ["Sales", "Dev"]
+    assert all("accountId" not in item for item in captured)
+
+
+@pytest.mark.asyncio
+async def test_same_channel_reregisters_and_missing_name_remains_null(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return True
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["channel"] = {"id": "SALES-ID"}
+    activity.conversation = SimpleNamespace(
+        id="conversation-sales", tenant_id="tenant-1", conversation_type="channel"
+    )
+    assert await activity_handler.capture_channel_destination_from_activity(activity)
+    assert await activity_handler.capture_channel_destination_from_activity(activity)
+    assert len(captured) == 2
+    assert captured[0]["channelName"] is None
+    assert captured[0]["channelId"] == captured[1]["channelId"] == "SALES-ID"
+
+
+@pytest.mark.asyncio
+async def test_team_level_or_missing_channel_identity_is_not_registered(monkeypatch):
+    async def unexpected(payload):
+        raise AssertionError("team-level activity must not register a destination")
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    assert not await activity_handler.capture_channel_destination_from_activity(
+        sample_activity()
+    )
+    activity = conversation_named_channel_activity()
+    activity.channel_data.pop("channel")
+    assert not await activity_handler.capture_channel_destination_from_activity(activity)
+
+
+@pytest.mark.asyncio
+async def test_backend_destination_client_uses_internal_endpoint(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured.update(url=url, **kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(
+        backend_client,
+        "get_settings",
+        lambda: SimpleNamespace(
+            BACKEND_BASE_URL="https://backend.example",
+            BACKEND_TIMEOUT_SECONDS=5,
+            INTERNAL_API_KEY="internal-key",
+        ),
+    )
+    payload = {
+        "tenantId": "tenant-1", "teamId": "team-1", "channelId": "sales",
+        "conversationId": "conversation-sales", "serviceUrl": "https://service/",
+    }
+    assert await backend_client.register_teams_destination(payload)
+    assert captured["url"].endswith("/api/teams/channel-destinations")
+    assert captured["json"] == payload
+    assert captured["headers"] == {"X-Internal-API-Key": "internal-key"}

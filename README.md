@@ -162,6 +162,23 @@ errors and already-disconnected responses do not crash Teams activity handling.
 An uninstall that occurred before this handler was deployed cannot be replayed;
 repair that confirmed stale installation through the backend disconnect API.
 
+## Channel destinations
+
+Team/app lifecycle and notification destinations are intentionally separate.
+When a `conversationUpdate`, channel-scoped `installationUpdate/add`, or channel
+`message` contains real tenant, Team, channel, conversation, and service URL
+context, the bot registers it through the internal
+`POST /api/teams/channel-destinations` endpoint. The bot never supplies an
+`accountId`; the backend resolves tenant ownership.
+
+The channel name comes from `channelData.channel.name`, then
+`conversation.name` only for `conversationType=channel`, otherwise it remains
+null. A Team-level activity without a channel ID does not create a destination.
+Repeated observations are safe backend upserts. Current Teams lifecycle events
+do not provide a proven channel-only uninstall signal, so Team uninstall
+disables all destinations for that Team while individual channel history is
+otherwise retained.
+
 ## Sample `POST /api/notifications` (initial notification)
 
 ```bash
