@@ -19,6 +19,7 @@ from app.storage.conversation_store import (
     conversation_store,
 )
 from app.utils.logger import get_logger, log_event
+from app.utils.teams_context import extract_teams_context
 
 logger = get_logger(__name__)
 
@@ -36,19 +37,12 @@ class ConversationService:
         Safe to call defensively on any Teams activity: if the required
         Teams channel data isn't present, this is a no-op.
         """
-        activity = turn_context.activity
-        channel_data = activity.channel_data or {}
-        team = channel_data.get("team") or {}
-
-        team_id = team.get("id") or channel_data.get("teamsTeamId")
-        channel = channel_data.get("channel") or {}
-        channel_id = channel.get("id") or channel_data.get("teamsChannelId")
-        tenant = channel_data.get("tenant") or {}
-        tenant_id = tenant.get("id") or (
-            activity.conversation.tenant_id if activity.conversation else None
-        )
-        conversation_id = activity.conversation.id if activity.conversation else None
-        service_url = activity.service_url
+        context = extract_teams_context(turn_context.activity)
+        team_id = context["teamId"]
+        channel_id = context["channelId"]
+        tenant_id = context["tenantId"]
+        conversation_id = context["conversationId"]
+        service_url = context["serviceUrl"]
 
         if not (team_id and channel_id and conversation_id and service_url):
             # Not enough Teams context to register a channel reference

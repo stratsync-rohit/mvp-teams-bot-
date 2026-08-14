@@ -37,7 +37,7 @@ from app.config import get_settings
 from app.services.n8n_service import N8nActionWebhookError, N8nService
 from app.storage.idempotency_store import idempotency_store
 from app.utils.logger import get_logger, log_event
-from app.utils.teams_context import extract_teams_context
+from app.utils.teams_context import channel_metadata_diagnostic, extract_teams_context
 
 logger = get_logger(__name__)
 
@@ -49,6 +49,7 @@ ADAPTIVE_CARD_ACTION_NAME = "adaptiveCard/action"
 async def register_installation_from_activity(activity) -> bool:
     """Register a valid Team-scoped activity without disrupting its processing."""
     context = extract_teams_context(activity)
+    diagnostic = channel_metadata_diagnostic(activity)
     if not (
         context["tenantId"]
         and context["teamId"]
@@ -56,6 +57,19 @@ async def register_installation_from_activity(activity) -> bool:
         and context["serviceUrl"]
     ):
         return False
+
+    log_event(
+        logger,
+        (
+            "teams_channel_metadata_found"
+            if context["channelName"]
+            else "teams_channel_name_missing"
+        ),
+        tenant_id=context["tenantId"],
+        team_id=context["teamId"],
+        channel_id=context["channelId"],
+        **diagnostic,
+    )
 
     settings = get_settings()
     payload = {

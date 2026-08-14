@@ -39,6 +39,12 @@ _SAFE_FIELDS = (
     "status",
     "section_type",
     "correlation_id",
+    "has_channel_data",
+    "has_team",
+    "has_channel",
+    "has_channel_name",
+    "conversation_type",
+    "resolution_source",
 )
 
 

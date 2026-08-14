@@ -26,6 +26,18 @@ def sample_activity(*, with_metadata=False, with_actor=False):
     )
 
 
+def conversation_named_channel_activity():
+    activity = sample_activity()
+    activity.channel_data["channel"] = {"id": "channel-1"}
+    activity.conversation = SimpleNamespace(
+        id="conversation-1",
+        tenant_id="tenant-1",
+        conversation_type="channel",
+        name="Risk Alerts",
+    )
+    return activity
+
+
 def removal_activity(*, tenant_id="tenant-1", team_id="team-1", conversation_id="conversation-1"):
     return SimpleNamespace(
         type="installationUpdate",
@@ -60,6 +72,33 @@ def test_extracts_real_team_channel_and_activity_actor():
     assert result["connectedByName"] == "Installation Actor"
     assert result["connectedById"] == "teams-user-1"
     assert result["connectedByAadObjectId"] == "aad-1"
+
+
+def test_extracts_channel_name_from_channel_conversation_fallback():
+    result = extract_teams_context(conversation_named_channel_activity())
+    assert result["channelId"] == "channel-1"
+    assert result["conversationId"] == "conversation-1"
+    assert result["channelName"] == "Risk Alerts"
+
+
+def test_does_not_treat_non_channel_conversation_name_as_channel_name():
+    activity = conversation_named_channel_activity()
+    activity.conversation.conversation_type = "personal"
+    activity.conversation.name = "Installation Actor"
+    assert extract_teams_context(activity)["channelName"] is None
+
+
+def test_existing_teams_fallback_ids_still_work():
+    activity = sample_activity()
+    activity.channel_data = {
+        "tenant": {"id": "tenant-1"},
+        "teamsTeamId": "fallback-team",
+        "teamsChannelId": "fallback-channel",
+    }
+    result = extract_teams_context(activity)
+    assert result["teamId"] == "fallback-team"
+    assert result["channelId"] == "fallback-channel"
+    assert result["channelName"] is None
 
 
 @pytest.mark.asyncio
@@ -101,6 +140,23 @@ async def test_registration_passes_optional_channel_and_actor_metadata(monkeypat
     ) is True
     assert captured["channelName"] == "General"
     assert captured["connectedByAadObjectId"] == "aad-1"
+    assert "accountId" not in captured
+
+
+@pytest.mark.asyncio
+async def test_registration_uses_channel_conversation_name_without_route(monkeypatch):
+    captured = {}
+
+    async def successful_registration(payload):
+        captured.update(payload)
+        return True
+
+    monkeypatch.setattr(activity_handler, "register_teams_installation", successful_registration)
+    assert await activity_handler.register_installation_from_activity(
+        conversation_named_channel_activity()
+    ) is True
+    assert captured["channelName"] == "Risk Alerts"
+    assert "routeKey" not in captured
     assert "accountId" not in captured
 
 
@@ -322,3 +378,39 @@ async def test_conversation_update_reuses_registration_flow(monkeypatch):
         SimpleNamespace(activity=sample_activity()), SimpleNamespace()
     )
     assert calls == ["capture", "register"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["installation", "conversation"])
+async def test_lifecycle_registration_payload_includes_resolved_channel_name(
+    monkeypatch, lifecycle
+):
+    captured = {}
+
+    async def capture(context):
+        return None
+
+    async def register(payload):
+        captured.update(payload)
+        return True
+
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_installation", register)
+    activity = conversation_named_channel_activity()
+    if lifecycle == "installation":
+        activity.action = "add"
+        await activity_handler.handle_installation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+    else:
+        await activity_handler.handle_conversation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+
+    assert captured["channelName"] == "Risk Alerts"
+    assert captured["channelId"] == "channel-1"
+    assert captured["conversationId"] == "conversation-1"
+    assert "accountId" not in captured
+    assert "routeKey" not in captured
