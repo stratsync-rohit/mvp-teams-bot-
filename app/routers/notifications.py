@@ -93,5 +93,12 @@ async def receive_notification(
         ) from exc
     except TeamsSendError as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+            status_code=(status.HTTP_503_SERVICE_UNAVAILABLE if exc.retryable else status.HTTP_410_GONE),
+            detail={
+                "success": False,
+                "errorType": "destination_unavailable" if not exc.retryable else "delivery_failed",
+                "errorCode": exc.code,
+                "destinationId": getattr(payload.destination, "destination_id", None),
+                "retryable": exc.retryable,
+            },
         ) from exc

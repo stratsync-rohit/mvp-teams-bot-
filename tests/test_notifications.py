@@ -377,6 +377,39 @@ def test_notifications_channel_not_registered_returns_404(monkeypatch):
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_status", "code", "retryable"),
+    [
+        (Exception("Conversation not found"), 410, "conversation_not_found", False),
+        (TimeoutError("secret raw timeout"), 503, "network_error", True),
+    ],
+)
+def test_notifications_normalizes_delivery_failures(
+    monkeypatch, error, expected_status, code, retryable
+):
+    async def fail_send(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(
+        "app.services.notification_service.send_to_conversation", fail_send
+    )
+    payload = {
+        **INITIAL_PAYLOAD,
+        "destination": {**INITIAL_PAYLOAD["destination"], "destinationId": "opaque-123"},
+    }
+    response = client.post("/api/notifications", json=payload)
+    assert response.status_code == expected_status
+    detail = response.json()["detail"]
+    assert detail == {
+        "success": False,
+        "errorType": "destination_unavailable" if not retryable else "delivery_failed",
+        "errorCode": code,
+        "destinationId": "opaque-123",
+        "retryable": retryable,
+    }
+    assert "secret raw timeout" not in response.text
+
+
 def test_notifications_internal_api_key_required(monkeypatch):
     from app.config import get_settings
 

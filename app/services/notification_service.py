@@ -35,7 +35,29 @@ class UnsupportedCardTypeError(Exception):
 
 
 class TeamsSendError(Exception):
-    pass
+    def __init__(self, code: str, retryable: bool):
+        self.code = code
+        self.retryable = retryable
+        super().__init__("Failed to send Adaptive Card to Microsoft Teams")
+
+
+def classify_teams_error(exc: Exception) -> tuple[str, bool]:
+    """Normalize SDK failures conservatively without returning raw responses."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    text = str(exc).lower()
+    if status == 429:
+        return "rate_limited", True
+    if status in {500, 502, 503, 504}:
+        return "microsoft_server_error", True
+    if any(marker in text for marker in ("conversation not found", "conversationnotfound")):
+        return "conversation_not_found", False
+    if any(marker in text for marker in ("channel not found", "channelnotfound")):
+        return "channel_not_found", False
+    if status == 403 and any(marker in text for marker in ("not a member", "bot not in", "permission revoked")):
+        return "permission_revoked", False
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "network_error", True
+    return "unknown_error", True
 
 
 _CARD_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -139,7 +161,8 @@ class NotificationService:
                 channel_id=channel_id,
                 conversation_id=conversation_id,
             )
-            raise TeamsSendError("Failed to send Adaptive Card to Microsoft Teams") from exc
+            code, retryable = classify_teams_error(exc)
+            raise TeamsSendError(code, retryable) from exc
 
         log_event(
             logger,

@@ -26,6 +26,7 @@ class Destination(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    destination_id: str | None = Field(default=None, alias="destinationId")
     tenant_id: str = Field(alias="tenantId")
     team_id: str = Field(alias="teamId")
     channel_id: str | None = Field(default=None, alias="channelId")
@@ -144,3 +145,13 @@ class NotificationResponse(BaseModel):
     event_id: str = Field(alias="eventId")
     risk_id: str = Field(alias="riskId")
     message: str
+
+
+class NotificationErrorResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    success: Literal[False] = False
+    error_type: str = Field(alias="errorType")
+    error_code: str = Field(alias="errorCode")
+    destination_id: str | None = Field(default=None, alias="destinationId")
+    retryable: bool

@@ -2,6 +2,8 @@
 
 Microsoft Teams communication layer for the Risk Notification System.
 
+> Full architecture, API, operations, security, troubleshooting, and handover documentation is available in [`docs/README.md`](docs/README.md).
+
 This service is **only** the Teams messaging layer:
 
 - It receives notification payloads from n8n and renders them as Microsoft
