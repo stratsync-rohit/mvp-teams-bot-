@@ -313,7 +313,8 @@ def test_notifications_initial_success(monkeypatch):
     mock_send.assert_awaited_once()
     assert mock_send.await_args.kwargs["conversation_id"] == "CONVERSATION_ID"
     assert mock_send.await_args.kwargs["service_url"].endswith("/apac/")
-    assert "channel_id" not in mock_send.await_args.kwargs
+    assert mock_send.await_args.kwargs["channel_id"] is None
+    assert mock_send.await_args.kwargs["team_id"] == "TEAM_ID"
 
 
 def test_notifications_action_result_success(monkeypatch):
@@ -329,6 +330,7 @@ def test_notifications_action_result_success(monkeypatch):
     assert body["success"] is True
     assert body["eventId"] == "evt-456"
     mock_send.assert_awaited_once()
+    assert mock_send.await_args.kwargs["channel_id"] is None
 
 
 def test_notifications_missing_destination_returns_400():

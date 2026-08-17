@@ -123,18 +123,34 @@ async def capture_channel_destination_from_activity(activity) -> bool:
     """Register only activity contexts that identify a real Teams channel."""
     context = extract_teams_context(activity)
     diagnostic = channel_metadata_diagnostic(activity)
-    if not (
+    verified_channel = bool(
         context["tenantId"]
         and context["teamId"]
         and context["channelId"]
-        and context["conversationId"]
         and context["serviceUrl"]
         and (
             diagnostic["has_channel"]
             or diagnostic["conversation_type"] == "channel"
         )
-    ):
+    )
+    if not verified_channel:
         return False
+
+    conversation_id = context["conversationId"]
+    if not conversation_id or (
+        conversation_id == context["teamId"]
+        and context["channelId"] != context["teamId"]
+    ):
+        conversation_id = context["channelId"]
+        log_event(
+            logger,
+            "teams_channel_conversation_normalized",
+            level=30,
+            tenant_id=context["tenantId"],
+            team_id=context["teamId"],
+            channel_id=context["channelId"],
+            conversation_id=conversation_id,
+        )
 
     payload = {
         "tenantId": context["tenantId"],
@@ -142,7 +158,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         "teamName": context["teamName"],
         "channelId": context["channelId"],
         "channelName": context["channelName"],
-        "conversationId": context["conversationId"],
+        "conversationId": conversation_id,
         "serviceUrl": context["serviceUrl"],
         "connectedByName": context["connectedByName"],
     }
@@ -150,7 +166,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         "tenant_id": context["tenantId"],
         "team_id": context["teamId"],
         "channel_id": context["channelId"],
-        "conversation_id": context["conversationId"],
+        "conversation_id": conversation_id,
     }
     log_event(logger, "teams_channel_destination_detected", **safe_context)
     log_event(

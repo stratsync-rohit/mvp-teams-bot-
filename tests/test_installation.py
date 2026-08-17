@@ -514,3 +514,45 @@ async def test_backend_destination_client_uses_internal_endpoint(monkeypatch):
     assert captured["url"].endswith("/api/teams/channel-destinations")
     assert captured["json"] == payload
     assert captured["headers"] == {"X-Internal-API-Key": "internal-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incoming_conversation", ["team-1", None])
+async def test_verified_channel_normalizes_team_or_missing_conversation(
+    monkeypatch, incoming_conversation, caplog
+):
+    captured = {}
+
+    async def register(payload):
+        captured.update(payload)
+        return True
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["channel"] = {"id": "channel-1", "name": "r_test"}
+    activity.conversation = SimpleNamespace(
+        id=incoming_conversation,
+        tenant_id="tenant-1",
+        conversation_type="channel",
+    )
+    with caplog.at_level("WARNING"):
+        assert await activity_handler.capture_channel_destination_from_activity(activity)
+    assert captured["conversationId"] == captured["channelId"] == "channel-1"
+    assert "teams_channel_conversation_normalized" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conversation_type", ["personal", "groupChat", "meeting"])
+async def test_non_channel_conversations_are_not_normalized_or_registered(
+    monkeypatch, conversation_type
+):
+    async def unexpected(payload):
+        raise AssertionError("non-channel activity must not register")
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    activity = sample_activity()
+    activity.channel_data["teamsChannelId"] = "channel-1"
+    activity.conversation = SimpleNamespace(
+        id="team-1", tenant_id="tenant-1", conversation_type=conversation_type
+    )
+    assert not await activity_handler.capture_channel_destination_from_activity(activity)

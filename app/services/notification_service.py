@@ -97,6 +97,7 @@ class NotificationService:
             card=card,
             event_id=payload.event_id,
             risk_id=payload.risk_id,
+            destination_id=payload.destination.destination_id,
         )
 
         return NotificationResponse(
@@ -120,6 +121,7 @@ class NotificationService:
             card=card,
             event_id=payload.event_id,
             risk_id=payload.risk_id,
+            destination_id=payload.destination.destination_id,
         )
 
         return NotificationResponse(
@@ -140,13 +142,35 @@ class NotificationService:
         card: dict[str, Any],
         event_id: str,
         risk_id: str,
+        destination_id: str | None = None,
     ) -> None:
+        effective_conversation_id = (
+            channel_id
+            if team_id and channel_id and conversation_id == team_id and channel_id != team_id
+            else conversation_id
+        )
+        if effective_conversation_id != conversation_id:
+            log_event(
+                logger,
+                "teams_channel_conversation_normalized",
+                level=30,
+                event_id=event_id,
+                destination_id=destination_id,
+                tenant_id=tenant_id,
+                team_id=team_id,
+                channel_id=channel_id,
+                conversation_id=effective_conversation_id,
+            )
         try:
             message_id = await send_to_conversation(
                 tenant_id=tenant_id,
-                conversation_id=conversation_id,
+                conversation_id=effective_conversation_id,
                 service_url=service_url,
                 card=card,
+                team_id=team_id,
+                channel_id=channel_id,
+                event_id=event_id,
+                destination_id=destination_id,
             )
         except ChannelNotRegisteredError:
             raise
@@ -159,7 +183,7 @@ class NotificationService:
                 risk_id=risk_id,
                 team_id=team_id,
                 channel_id=channel_id,
-                conversation_id=conversation_id,
+                conversation_id=effective_conversation_id,
             )
             code, retryable = classify_teams_error(exc)
             raise TeamsSendError(code, retryable) from exc
@@ -171,7 +195,7 @@ class NotificationService:
             risk_id=risk_id,
             team_id=team_id,
             channel_id=channel_id,
-            conversation_id=conversation_id,
+            conversation_id=effective_conversation_id,
             message_id=message_id,
         )
 

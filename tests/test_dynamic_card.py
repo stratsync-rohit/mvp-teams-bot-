@@ -43,7 +43,7 @@ def test_dynamic_card_is_accepted_and_channel_id_null_remains_supported(monkeypa
     assert response.status_code == 200
     assert response.json()["success"] is True
     mock_send.assert_awaited_once()
-    assert "channel_id" not in mock_send.await_args.kwargs
+    assert mock_send.await_args.kwargs["channel_id"] is None
 
 
 def test_all_known_sections_render_in_supplied_order():
