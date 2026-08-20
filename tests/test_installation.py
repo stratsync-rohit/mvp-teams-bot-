@@ -105,6 +105,20 @@ def test_existing_teams_fallback_ids_still_work():
     assert result["channelName"] is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<at>StratSync</at> connect",
+        '<at id="0">StratSync</at> connect',
+        "  <AT ID='0'>StratSync</AT>   CoNnEcT  ",
+    ],
+)
+def test_connect_command_strips_teams_mention_variants(text):
+    activity = sample_activity(with_metadata=True)
+    activity.text = text
+    assert activity_handler._message_command(activity) == "connect"
+
+
 @pytest.mark.asyncio
 async def test_registration_failure_does_not_raise(monkeypatch):
     async def failed_registration(payload):
@@ -242,6 +256,8 @@ async def test_backend_disconnect_payload_and_internal_key(monkeypatch):
     captured = {}
 
     class FakeResponse:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -507,8 +523,13 @@ async def test_backend_destination_client_uses_internal_endpoint(monkeypatch):
     captured = {}
 
     class FakeResponse:
+        status_code = 200
+
         def raise_for_status(self):
             return None
+
+        def json(self):
+            return {"success": True, "destination": {"destinationId": "dest-1"}}
 
     class FakeClient:
         async def __aenter__(self):
@@ -535,7 +556,10 @@ async def test_backend_destination_client_uses_internal_endpoint(monkeypatch):
         "tenantId": "tenant-1", "teamId": "team-1", "channelId": "sales",
         "conversationId": "conversation-sales", "serviceUrl": "https://service/",
     }
-    assert await backend_client.register_teams_destination(payload)
+    result = await backend_client.register_teams_destination(payload)
+    assert result
+    assert result.status_code == 200
+    assert result.destination_id == "dest-1"
     assert captured["url"].endswith("/api/teams/channel-destinations")
     assert captured["json"] == payload
     assert captured["headers"] == {"X-Internal-API-Key": "internal-key"}
@@ -629,6 +653,55 @@ async def test_explicit_connect_registers_two_channels_without_new_install_event
         "Channel connected successfully. StratSync can now send notifications here."
     ]
     assert second.sent == first.sent
+
+
+@pytest.mark.asyncio
+async def test_explicit_connect_registers_three_channels_in_same_team(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return True
+
+    async def capture(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    contexts = [
+        MessageContext(channel_message(channel_id, name))
+        for channel_id, name in (
+            ("FINAL-TEST", "final test"), ("FINAL2", "final2"), ("R2", "r2")
+        )
+    ]
+    for context in contexts:
+        await activity_handler.handle_message(context, SimpleNamespace())
+
+    assert [item["channelId"] for item in captured] == ["FINAL-TEST", "FINAL2", "R2"]
+    assert len({item["conversationId"] for item in captured}) == 3
+
+
+@pytest.mark.asyncio
+async def test_backend_4xx_is_surfaced_to_connect_user(monkeypatch):
+    async def register(payload):
+        return backend_client.DestinationRegistrationResult(
+            False, status_code=422, error="HTTPStatusError"
+        )
+
+    async def capture(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    context = MessageContext(channel_message("FINAL2", "final2"))
+    await activity_handler.handle_message(context, SimpleNamespace())
+    assert context.sent == [
+        "StratSync could not connect this channel because backend registration failed. Please try again or contact support."
+    ]
 
 
 @pytest.mark.asyncio

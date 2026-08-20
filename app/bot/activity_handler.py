@@ -32,6 +32,7 @@ from app.bot.teams_bot import agent_app
 from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
 from app.services.conversation_service import conversation_service
 from app.services.backend_client import (
+    DestinationRegistrationResult,
     disconnect_teams_installation,
     register_teams_destination,
     register_teams_installation,
@@ -123,7 +124,9 @@ async def register_installation_from_activity(activity) -> bool:
     return registered
 
 
-async def capture_channel_destination_from_activity(activity) -> bool:
+async def capture_channel_destination_from_activity(
+    activity,
+) -> DestinationRegistrationResult:
     """Register only activity contexts that identify a real Teams channel."""
     context = extract_teams_context(activity)
     diagnostic = channel_metadata_diagnostic(activity)
@@ -139,7 +142,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         )
     )
     if not verified_channel:
-        return False
+        return DestinationRegistrationResult(False, error="InvalidTeamsChannelContext")
 
     conversation_id = context["conversationId"]
     if conversation_id == context["teamId"] and context["channelId"] != context["teamId"]:
@@ -152,7 +155,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
             channel_id=context["channelId"],
             conversation_id=conversation_id,
         )
-        return False
+        return DestinationRegistrationResult(False, error="TeamLevelConversationIdentity")
 
     payload = {
         "tenantId": context["tenantId"],
@@ -175,7 +178,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         logger, "teams_channel_destination_registration_requested", **safe_context
     )
     try:
-        registered = await register_teams_destination(payload)
+        result = await register_teams_destination(payload)
     except Exception as exc:
         log_event(
             logger,
@@ -184,16 +187,26 @@ async def capture_channel_destination_from_activity(activity) -> bool:
             error_type=type(exc).__name__,
             **safe_context,
         )
-        return False
-    if registered:
-        log_event(logger, "teams_channel_destination_registered", **safe_context)
-    return registered
+        return DestinationRegistrationResult(False, error=type(exc).__name__)
+    # Keep compatibility with simple boolean fakes while preserving rich
+    # production results from the backend client.
+    if isinstance(result, bool):
+        result = DestinationRegistrationResult(result)
+    if result:
+        log_event(
+            logger, "teams_channel_destination_registered",
+            destination_id=result.destination_id, status=result.status_code,
+            **safe_context,
+        )
+    return result
 
 
 def _message_command(activity) -> str | None:
     """Extract a bare command while tolerating the Teams bot mention markup."""
     text = html.unescape(getattr(activity, "text", None) or "")
-    text = re.sub(r"<at>.*?</at>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE | re.DOTALL
+    )
     command = " ".join(text.strip().lower().split())
     return command if command in {CONNECT_COMMAND, DISCONNECT_COMMAND} else None
 
@@ -227,11 +240,25 @@ async def disconnect_channel_from_activity(activity) -> bool:
 
 async def handle_message(context: TurnContext, state: TurnState) -> None:
     """Handle explicit channel connection commands; ignore ordinary messages."""
-    command = _message_command(context.activity)
+    activity = context.activity
+    raw_text = html.unescape(getattr(activity, "text", None) or "")
+    command = _message_command(activity)
+    if command is not None:
+        diagnostic = channel_metadata_diagnostic(activity)
+        activity_context = extract_teams_context(activity)
+        log_event(
+            logger, "teams_connect_command_received",
+            activity_type=getattr(activity, "type", None), raw_text=raw_text,
+            normalized_command=command,
+            tenant_id=activity_context["tenantId"], team_id=activity_context["teamId"],
+            channel_id=activity_context["channelId"],
+            conversation_id=activity_context["conversationId"],
+            service_url_present=bool(activity_context["serviceUrl"]), **diagnostic,
+        )
     if command is None:
         return
 
-    activity_context = extract_teams_context(context.activity)
+    activity_context = extract_teams_context(activity)
     log_event(
         logger, "teams_channel_connect_requested" if command == CONNECT_COMMAND
         else "teams_channel_disconnect_requested",
@@ -241,12 +268,13 @@ async def handle_message(context: TurnContext, state: TurnState) -> None:
     )
     if command == CONNECT_COMMAND:
         await conversation_service.capture_from_turn_context(context)
-        successful = await capture_channel_destination_from_activity(context.activity)
-        message = (
-            "Channel connected successfully. StratSync can now send notifications here."
-            if successful else
-            "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
-        )
+        result = await capture_channel_destination_from_activity(activity)
+        if result:
+            message = "Channel connected successfully. StratSync can now send notifications here."
+        elif result.error in {"InvalidTeamsChannelContext", "TeamLevelConversationIdentity"}:
+            message = "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
+        else:
+            message = "StratSync could not connect this channel because backend registration failed. Please try again or contact support."
     else:
         try:
             successful = await disconnect_channel_from_activity(context.activity)

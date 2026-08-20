@@ -1,4 +1,5 @@
 """Small HTTP client for synchronizing Teams installations with the backend."""
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
@@ -9,6 +10,17 @@ from app.utils.logger import get_logger, log_event
 logger = get_logger(__name__)
 
 TeamsDisconnectResult = Literal["disconnected", "not_found", "failed"]
+
+
+@dataclass(frozen=True)
+class DestinationRegistrationResult:
+    success: bool
+    status_code: int | None = None
+    destination_id: str | None = None
+    error: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 async def register_teams_installation(payload: dict[str, Any]) -> bool:
@@ -46,7 +58,9 @@ async def register_teams_installation(payload: dict[str, Any]) -> bool:
     return True
 
 
-async def register_teams_destination(payload: dict[str, Any]) -> bool:
+async def register_teams_destination(
+    payload: dict[str, Any],
+) -> DestinationRegistrationResult:
     """Register one observed Teams channel without supplying an account ID."""
     settings = get_settings()
     headers = {}
@@ -56,8 +70,18 @@ async def register_teams_destination(payload: dict[str, Any]) -> bool:
     try:
         async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=payload, headers=headers)
+            log_event(
+                logger,
+                "teams_channel_destination_backend_response",
+                status=response.status_code,
+                tenant_id=payload.get("tenantId"),
+                team_id=payload.get("teamId"),
+                channel_id=payload.get("channelId"),
+            )
             response.raise_for_status()
+            body = response.json()
     except (httpx.HTTPError, ValueError) as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
         log_event(
             logger,
             "teams_channel_destination_registration_failed",
@@ -66,10 +90,29 @@ async def register_teams_destination(payload: dict[str, Any]) -> bool:
             team_id=payload.get("teamId"),
             channel_id=payload.get("channelId"),
             conversation_id=payload.get("conversationId"),
+            status=status_code,
             error_type=type(exc).__name__,
         )
-        return False
-    return True
+        return DestinationRegistrationResult(
+            success=False,
+            status_code=status_code,
+            error=type(exc).__name__,
+        )
+    destination_id = (body.get("destination") or {}).get("destinationId")
+    log_event(
+        logger,
+        "teams_channel_destination_backend_succeeded",
+        status=response.status_code,
+        destination_id=destination_id,
+        tenant_id=payload.get("tenantId"),
+        team_id=payload.get("teamId"),
+        channel_id=payload.get("channelId"),
+    )
+    return DestinationRegistrationResult(
+        success=True,
+        status_code=response.status_code,
+        destination_id=destination_id,
+    )
 
 
 async def disconnect_teams_installation(
