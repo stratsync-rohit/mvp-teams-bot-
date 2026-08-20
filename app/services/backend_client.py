@@ -18,6 +18,8 @@ class DestinationRegistrationResult:
     status_code: int | None = None
     destination_id: str | None = None
     error: str | None = None
+    enabled: bool | None = None
+    disconnect_reason: str | None = None
 
     def __bool__(self) -> bool:
         return self.success
@@ -98,7 +100,8 @@ async def register_teams_destination(
             status_code=status_code,
             error=type(exc).__name__,
         )
-    destination_id = (body.get("destination") or {}).get("destinationId")
+    destination = body.get("destination") or {}
+    destination_id = destination.get("destinationId")
     log_event(
         logger,
         "teams_channel_destination_backend_succeeded",
@@ -112,6 +115,8 @@ async def register_teams_destination(
         success=True,
         status_code=response.status_code,
         destination_id=destination_id,
+        enabled=destination.get("enabled"),
+        disconnect_reason=destination.get("disconnectReason"),
     )
 
 

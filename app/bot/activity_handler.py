@@ -129,25 +129,46 @@ async def register_installation_from_activity(activity) -> bool:
 
 
 async def capture_channel_destination_from_activity(
-    activity,
+    activity, *, trigger: str = "explicit_connect",
+    allow_authoritative_channel_normalization: bool = False,
 ) -> DestinationRegistrationResult:
-    """Register only activity contexts that identify a real Teams channel."""
+    """Capture and register one authoritative Teams channel idempotently."""
     context = extract_teams_context(activity)
     diagnostic = channel_metadata_diagnostic(activity)
+    source_conversation_id = context["conversationId"]
+    channel_source = context["channelResolutionSource"]
+    safe_context = {
+        "trigger": trigger, "tenant_id": context["tenantId"],
+        "team_id": context["teamId"], "channel_id": context["channelId"],
+        "channel_name": context["channelName"],
+        "source_conversation_id": source_conversation_id,
+        "channel_resolution_source": channel_source,
+    }
+    event_type = (diagnostic["event_type"] or "").lower()
+    if event_type in {"channeldeleted", "channelremoved"}:
+        log_event(logger, "teams_channel_auto_registration_skipped",
+                  skip_reason="channel_removal_event", **safe_context)
+        return DestinationRegistrationResult(False, error="ChannelRemovalEvent")
+    required = (context["tenantId"], context["teamId"], context["channelId"],
+                context["serviceUrl"], channel_source)
+    if not all(required):
+        log_event(logger, "teams_channel_auto_registration_skipped",
+                  skip_reason="authoritative_channel_context_missing", **safe_context)
+        return DestinationRegistrationResult(False, error="InvalidTeamsChannelContext")
     verified_channel = has_authoritative_channel_conversation(activity)
-    if not verified_channel:
-        if context["channelId"] and context["conversationId"]:
-            log_event(
-                logger, "teams_channel_identity_unsupported", level=30,
-                tenant_id=context["tenantId"], team_id=context["teamId"],
-                channel_id=context["channelId"],
-                conversation_id=context["conversationId"],
-                event_type=diagnostic["event_type"],
-            )
+    if verified_channel:
+        conversation_id = source_conversation_id
+    elif allow_authoritative_channel_normalization:
+        conversation_id = context["channelId"]
+    else:
+        log_event(logger, "teams_channel_auto_registration_skipped",
+                  skip_reason="conversation_is_not_channel", **safe_context)
         return DestinationRegistrationResult(False, error="InvalidTeamsChannelContext")
 
-    conversation_id = context["conversationId"]
-
+    safe_context["destination_conversation_id"] = conversation_id
+    log_event(logger, "teams_channel_auto_registration_started", **safe_context)
+    if conversation_id != source_conversation_id:
+        log_event(logger, "teams_channel_conversation_normalized", **safe_context)
     payload = {
         "tenantId": context["tenantId"],
         "teamId": context["teamId"],
@@ -157,23 +178,14 @@ async def capture_channel_destination_from_activity(
         "conversationId": conversation_id,
         "serviceUrl": context["serviceUrl"],
         "connectedByName": context["connectedByName"],
+        "registrationTrigger": trigger,
     }
-    safe_context = {
-        "tenant_id": context["tenantId"],
-        "team_id": context["teamId"],
-        "channel_id": context["channelId"],
-        "conversation_id": conversation_id,
-    }
-    log_event(logger, "teams_channel_identity_detected", **safe_context)
-    log_event(
-        logger, "teams_channel_destination_registration_requested", **safe_context
-    )
     try:
         result = await register_teams_destination(payload)
     except Exception as exc:
         log_event(
             logger,
-            "teams_channel_destination_registration_failed",
+            "teams_channel_auto_registration_failed",
             level=40,
             error_type=type(exc).__name__,
             **safe_context,
@@ -183,12 +195,24 @@ async def capture_channel_destination_from_activity(
     # production results from the backend client.
     if isinstance(result, bool):
         result = DestinationRegistrationResult(result)
-    if result:
+    if result and result.enabled is not False:
+        await conversation_service.save_channel_context({
+            **context, "destinationConversationId": conversation_id,
+        })
         log_event(
-            logger, "teams_channel_destination_registered",
-            destination_id=result.destination_id, status=result.status_code,
+            logger, "teams_channel_auto_registered",
+            destination_id=result.destination_id, backend_status=result.status_code,
             **safe_context,
         )
+    elif result and result.disconnect_reason == "manual_removal":
+        log_event(logger, "teams_channel_auto_registration_skipped",
+                  destination_id=result.destination_id,
+                  backend_status=result.status_code,
+                  skip_reason="manual_removal", **safe_context)
+    else:
+        log_event(logger, "teams_channel_auto_registration_failed", level=40,
+                  destination_id=result.destination_id,
+                  backend_status=result.status_code, **safe_context)
     return result
 
 
@@ -258,8 +282,9 @@ async def handle_message(context: TurnContext, state: TurnState) -> None:
         conversation_id=activity_context["conversationId"],
     )
     if command == CONNECT_COMMAND:
-        await conversation_service.capture_from_turn_context(context)
-        result = await capture_channel_destination_from_activity(activity)
+        result = await capture_channel_destination_from_activity(
+            activity, trigger="explicit_connect"
+        )
         if result:
             message = "Channel connected successfully. StratSync can now send notifications here."
         elif result.error in {"InvalidTeamsChannelContext", "TeamLevelConversationIdentity"}:
@@ -337,13 +362,15 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
     if action == "remove":
         await disconnect_installation_from_activity(context.activity)
     elif action == "add":
-        await conversation_service.capture_from_turn_context(context)
         await register_installation_from_activity(context.activity)
-        await capture_channel_destination_from_activity(context.activity)
+        await capture_channel_destination_from_activity(
+            context.activity, trigger="installation_add",
+            allow_authoritative_channel_normalization=True,
+        )
 
 
 async def handle_conversation_update(context: TurnContext, state: TurnState) -> None:
-    """Treat channel-created events as discovery, never as sendable routes."""
+    """Register safe channel routes discovered through conversation updates."""
     diagnostic = channel_metadata_diagnostic(context.activity)
     activity_context = extract_teams_context(context.activity)
     if (diagnostic["event_type"] or "").lower() == "channelcreated":
@@ -356,10 +383,15 @@ async def handle_conversation_update(context: TurnContext, state: TurnState) -> 
             event_type=diagnostic["event_type"],
             channel_name=activity_context["channelName"],
         )
+        await capture_channel_destination_from_activity(
+            context.activity, trigger="channel_created",
+            allow_authoritative_channel_normalization=True,
+        )
         return
-    await conversation_service.capture_from_turn_context(context)
     await register_installation_from_activity(context.activity)
-    await capture_channel_destination_from_activity(context.activity)
+    await capture_channel_destination_from_activity(
+        context.activity, trigger="conversation_update"
+    )
 
     log_event(
         logger,

@@ -167,18 +167,29 @@ repair that confirmed stale installation through the backend disconnect API.
 ## Channel destinations
 
 Team/app lifecycle and notification destinations are intentionally separate.
-When a `conversationUpdate`, channel-scoped `installationUpdate/add`, or explicit
-`connect` command contains real tenant, Team, channel, conversation, and service
-URL context, the bot registers it through the internal
+When a channel-specific `conversationUpdate`, `channelCreated`,
+`installationUpdate/add`, or explicit fallback `connect` command contains an
+authoritative Teams channel field, the bot registers it through the internal
 `POST /api/teams/channel-destinations` endpoint. The bot never supplies an
 `accountId`; the backend resolves tenant ownership.
 
-Teams app installation is Team-scoped and does not generate an add event for
-every channel. To connect another channel in the same Team, mention the bot in
-that target channel and send `connect` (for example, `@StratSync connect`). Send
-`disconnect` in that channel to disable only that destination. Ordinary channel
-messages do not register destinations, and personal/group chats are rejected.
-No Microsoft Graph channel enumeration or fabricated conversation ID is used.
+The authoritative sources are `channelData.channel.id`,
+`channelData.teamsChannelId`, `channelData.settings.selectedChannel.id`, and
+`channelData.selectedChannel.id` (including SDK snake-case forms). For
+`channelCreated` and installation-selected-channel events, the incoming activity
+conversation may be the Team ID; after the channel field is verified, only the
+destination route is normalized so `conversationId = channelId`. The raw source
+conversation ID remains available in structured logs. Team-level activities
+without one of these channel fields never create a destination.
+
+The `connect` and `disconnect` commands remain backward-compatible fallbacks.
+An automatic retry does not reactivate a destination explicitly removed in the
+StratSync UI; an explicit `connect` is required. Personal/group chats and channel
+remove/delete events are rejected.
+
+Without Microsoft Graph, the bot cannot enumerate every channel that existed
+before installation unless Microsoft Teams sends an authoritative
+channel-specific event for that channel.
 
 The channel name comes from `channelData.channel.name`, then
 `conversation.name` only for `conversationType=channel`, otherwise it remains
@@ -323,5 +334,5 @@ Verify live lifecycle activity without exposing secrets:
 
 ```bash
 docker logs -f risk-teams-bot 2>&1 | grep --line-buffered -E \
-  'teams_app_removal_received|teams_installation_(received|registered|disconnect_)'
+  'teams_channel_auto_registration_(started|failed|skipped)|teams_channel_conversation_normalized|teams_channel_auto_registered|teams_app_removal_received|teams_installation_(received|registered|disconnect_)'
 ```

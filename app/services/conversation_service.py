@@ -70,6 +70,25 @@ class ConversationService:
             conversation_id=conversation_id,
         )
 
+    async def save_channel_context(self, context: dict) -> None:
+        """Persist a validated, normalized channel route for proactive delivery."""
+        reference = ChannelConversationReference(
+            tenant_id=context["tenantId"],
+            team_id=context["teamId"],
+            channel_id=context["channelId"],
+            conversation_id=context["destinationConversationId"],
+            service_url=context["serviceUrl"],
+        )
+        await self._store.save(reference)
+        log_event(
+            logger,
+            "Captured Teams channel conversation reference",
+            tenant_id=reference.tenant_id,
+            team_id=reference.team_id,
+            channel_id=reference.channel_id,
+            conversation_id=reference.conversation_id,
+        )
+
     async def get_reference(
         self, team_id: str, channel_id: str
     ) -> Optional[ChannelConversationReference]:

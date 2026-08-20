@@ -63,6 +63,7 @@ def test_extract_teams_context_uses_optional_values():
         "tenantId": "tenant-1",
         "teamId": "team-1",
         "channelId": None,
+        "channelResolutionSource": None,
         "conversationId": "conversation-1",
         "serviceUrl": "https://smba.trafficmanager.net/emea/",
         "teamName": None,
@@ -389,55 +390,66 @@ async def test_installation_update_remove_uses_disconnect_flow(monkeypatch):
 async def test_installation_update_add_reuses_registration_flow(monkeypatch):
     calls = []
 
-    async def capture(context):
-        calls.append("capture")
-
     async def register(activity):
         calls.append("register")
         return True
 
+    async def register_destination(activity, **kwargs):
+        calls.append(("destination", kwargs))
+        return backend_client.DestinationRegistrationResult(False)
+
     monkeypatch.setattr(
-        activity_handler.conversation_service, "capture_from_turn_context", capture
+        activity_handler, "capture_channel_destination_from_activity",
+        register_destination,
     )
     monkeypatch.setattr(activity_handler, "register_installation_from_activity", register)
     activity = removal_activity()
     activity.action = "add"
     context = SimpleNamespace(activity=activity)
     await activity_handler.handle_installation_update(context, SimpleNamespace())
-    assert calls == ["capture", "register"]
+    assert calls == [
+        "register",
+        ("destination", {
+            "trigger": "installation_add",
+            "allow_authoritative_channel_normalization": True,
+        }),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_conversation_update_reuses_registration_flow(monkeypatch):
     calls = []
 
-    async def capture(context):
-        calls.append("capture")
-
     async def register(activity):
         calls.append("register")
         return True
 
-    monkeypatch.setattr(activity_handler.conversation_service, "capture_from_turn_context", capture)
+    async def register_destination(activity, **kwargs):
+        calls.append(("destination", kwargs))
+        return backend_client.DestinationRegistrationResult(False)
+
     monkeypatch.setattr(activity_handler, "register_installation_from_activity", register)
+    monkeypatch.setattr(
+        activity_handler, "capture_channel_destination_from_activity",
+        register_destination,
+    )
     await activity_handler.handle_conversation_update(
         SimpleNamespace(activity=sample_activity()), SimpleNamespace()
     )
-    assert calls == ["capture", "register"]
+    assert calls == ["register", ("destination", {"trigger": "conversation_update"})]
 
 
 @pytest.mark.asyncio
-async def test_channel_created_is_discovery_only(monkeypatch, caplog):
-    async def unexpected(*args, **kwargs):
-        raise AssertionError("channelCreated must not persist or register a route")
+async def test_channel_created_registers_authoritative_channel(monkeypatch, caplog):
+    captured = []
 
-    monkeypatch.setattr(
-        activity_handler.conversation_service, "capture_from_turn_context", unexpected
-    )
-    monkeypatch.setattr(activity_handler, "register_installation_from_activity", unexpected)
-    monkeypatch.setattr(
-        activity_handler, "capture_channel_destination_from_activity", unexpected
-    )
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(
+            True, status_code=200, destination_id="destination-1"
+        )
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = sample_activity(with_metadata=True)
     activity.channel_data["eventType"] = "channelCreated"
     activity.conversation.id = "team-1"
@@ -447,7 +459,108 @@ async def test_channel_created_is_discovery_only(monkeypatch, caplog):
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
 
-    assert "teams_channel_discovered" in caplog.text
+    assert captured[0]["channelId"] == "channel-1"
+    assert captured[0]["conversationId"] == "channel-1"
+    assert captured[0]["registrationTrigger"] == "channel_created"
+    reference = await activity_handler.conversation_service.get_reference(
+        "team-1", "channel-1"
+    )
+    assert reference.conversation_id == "channel-1"
+    assert reference.service_url == "https://smba.trafficmanager.net/emea/"
+    assert "teams_channel_conversation_normalized" in caplog.text
+    assert "teams_channel_auto_registered" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_two_channel_created_events_in_same_team_register_independently(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(True, 200, payload["channelId"])
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    for channel_id in ("channel-a", "channel-b"):
+        activity = sample_activity(with_metadata=True)
+        activity.channel_data["eventType"] = "channelCreated"
+        activity.channel_data["channel"] = {"id": channel_id, "name": channel_id}
+        activity.conversation.id = "team-1"
+        await activity_handler.handle_conversation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+
+    assert [(item["teamId"], item["channelId"], item["conversationId"])
+            for item in captured] == [
+        ("team-1", "channel-a", "channel-a"),
+        ("team-1", "channel-b", "channel-b"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_channel_created_uses_same_backend_identity(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(True, 200, "same-destination")
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["eventType"] = "channelCreated"
+    activity.conversation.id = "team-1"
+    for _ in range(2):
+        await activity_handler.handle_conversation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+
+    identities = [tuple(item[field] for field in ("tenantId", "teamId", "channelId"))
+                  for item in captured]
+    assert identities == [("tenant-1", "team-1", "channel-1")] * 2
+
+
+@pytest.mark.asyncio
+async def test_installation_selected_channel_is_normalized_and_registered(monkeypatch):
+    captured = []
+
+    async def register_installation(activity):
+        return True
+
+    async def register_destination(payload):
+        captured.append(payload)
+        return True
+
+    monkeypatch.setattr(
+        activity_handler, "register_installation_from_activity", register_installation
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
+    activity = sample_activity()
+    activity.action = "add"
+    activity.channel_data["settings"] = {
+        "selectedChannel": {"id": "selected-channel", "name": "Selected"}
+    }
+    activity.conversation.id = "team-1"
+    await activity_handler.handle_installation_update(
+        SimpleNamespace(activity=activity), SimpleNamespace()
+    )
+
+    assert captured[0]["channelId"] == "selected-channel"
+    assert captured[0]["channelName"] == "Selected"
+    assert captured[0]["conversationId"] == "selected-channel"
+    assert captured[0]["registrationTrigger"] == "installation_add"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["channelDeleted", "channelRemoved"])
+async def test_channel_removal_events_never_register(monkeypatch, event_type):
+    async def unexpected(payload):
+        raise AssertionError("channel removal must not register a destination")
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["eventType"] = event_type
+    assert not await activity_handler.capture_channel_destination_from_activity(
+        activity, trigger="conversation_update"
+    )
 
 
 @pytest.mark.asyncio
@@ -610,10 +723,10 @@ async def test_channel_registration_rejects_non_authoritative_conversation(
         tenant_id="tenant-1",
         conversation_type="channel",
     )
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         assert not await activity_handler.capture_channel_destination_from_activity(activity)
     if incoming_conversation == "team-1":
-        assert "teams_channel_identity_unsupported" in caplog.text
+        assert "teams_channel_auto_registration_skipped" in caplog.text
 
 
 @pytest.mark.asyncio
