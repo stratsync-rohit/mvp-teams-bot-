@@ -72,17 +72,7 @@ def get_settings() -> Settings:
 
 
 def get_agent_auth_configuration():
-    """
-    Builds the current Microsoft 365 Agents SDK ``AgentAuthConfiguration``
-    (used for both outbound token acquisition and inbound JWT validation on
-    POST /api/messages) from our simplified environment variables.
-
-    In development, when no Microsoft App credentials are configured, we
-    allow anonymous requests to /api/messages via the SDK's own documented
-    ``ANONYMOUS_ALLOWED`` flag. This is a Microsoft-supported mechanism (see
-    microsoft_agents.hosting.core.authorization.jwt._authorize_request) and
-    NOT a custom auth bypass.
-    """
+  
     from microsoft_agents.hosting.core import AgentAuthConfiguration, AuthTypes
 
     settings = get_settings()

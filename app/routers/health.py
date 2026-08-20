@@ -5,4 +5,4 @@ router = APIRouter()
 
 @router.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "teams-bot"}
+    return {"status": "ok", "service": "teams-bot is running"}

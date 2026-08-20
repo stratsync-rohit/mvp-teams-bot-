@@ -54,6 +54,8 @@ app.include_router(notifications.router)
 @app.post("/api/messages")
 @jwt_authorization_decorator
 async def messages(request: Request) -> Response:
+    body = await request.json()
+    print("Received message:", body)
   
     response = await start_agent_process(request, agent_app, adapter)
     return response if response is not None else Response(status_code=200)
