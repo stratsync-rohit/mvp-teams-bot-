@@ -15,9 +15,14 @@ def sample_activity(*, with_metadata=False, with_actor=False):
             "team": {"id": "team-1", "name": "Operations"},
             "channel": {"id": "channel-1", "name": "General"},
         })
+    conversation = SimpleNamespace(id="conversation-1", tenant_id="tenant-1")
+    if with_metadata:
+        conversation = SimpleNamespace(
+            id="channel-1", tenant_id="tenant-1", conversation_type="channel"
+        )
     return SimpleNamespace(
         channel_data=channel_data,
-        conversation=SimpleNamespace(id="conversation-1", tenant_id="tenant-1"),
+        conversation=conversation,
         service_url="https://smba.trafficmanager.net/emea/",
         from_property=(
             SimpleNamespace(id="teams-user-1", name="Installation Actor", aad_object_id="aad-1")
@@ -30,7 +35,7 @@ def conversation_named_channel_activity():
     activity = sample_activity()
     activity.channel_data["channel"] = {"id": "channel-1"}
     activity.conversation = SimpleNamespace(
-        id="conversation-1",
+        id="channel-1",
         tenant_id="tenant-1",
         conversation_type="channel",
         name="Risk Alerts",
@@ -81,7 +86,7 @@ def test_extracts_real_team_channel_and_activity_actor():
 def test_extracts_channel_name_from_channel_conversation_fallback():
     result = extract_teams_context(conversation_named_channel_activity())
     assert result["channelId"] == "channel-1"
-    assert result["conversationId"] == "conversation-1"
+    assert result["conversationId"] == "channel-1"
     assert result["channelName"] == "Risk Alerts"
 
 
@@ -422,6 +427,30 @@ async def test_conversation_update_reuses_registration_flow(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_channel_created_is_discovery_only(monkeypatch, caplog):
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("channelCreated must not persist or register a route")
+
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", unexpected
+    )
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", unexpected)
+    monkeypatch.setattr(
+        activity_handler, "capture_channel_destination_from_activity", unexpected
+    )
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["eventType"] = "channelCreated"
+    activity.conversation.id = "team-1"
+
+    with caplog.at_level("INFO"):
+        await activity_handler.handle_conversation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+
+    assert "teams_channel_discovered" in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("lifecycle", ["installation", "conversation"])
 async def test_lifecycle_registration_payload_includes_resolved_channel_name(
     monkeypatch, lifecycle
@@ -453,7 +482,7 @@ async def test_lifecycle_registration_payload_includes_resolved_channel_name(
 
     assert captured["channelName"] == "Risk Alerts"
     assert captured["channelId"] == "channel-1"
-    assert captured["conversationId"] == "conversation-1"
+    assert captured["conversationId"] == "channel-1"
     assert "accountId" not in captured
     assert "routeKey" not in captured
 
@@ -471,7 +500,7 @@ async def test_sales_and_dev_channel_activities_register_separate_destinations(m
         activity = sample_activity(with_metadata=True)
         activity.channel_data["channel"] = {"id": channel_id, "name": channel_name}
         activity.conversation = SimpleNamespace(
-            id=f"conversation-{channel_id}",
+            id=channel_id,
             tenant_id="tenant-1",
             conversation_type="channel",
             name=channel_name,
@@ -495,7 +524,7 @@ async def test_same_channel_reregisters_and_missing_name_remains_null(monkeypatc
     activity = sample_activity(with_metadata=True)
     activity.channel_data["channel"] = {"id": "SALES-ID"}
     activity.conversation = SimpleNamespace(
-        id="conversation-sales", tenant_id="tenant-1", conversation_type="channel"
+        id="SALES-ID", tenant_id="tenant-1", conversation_type="channel"
     )
     assert await activity_handler.capture_channel_destination_from_activity(activity)
     assert await activity_handler.capture_channel_destination_from_activity(activity)
@@ -618,7 +647,7 @@ def channel_message(channel_id, channel_name, text="<at>StratSync</at> connect")
     activity.text = text
     activity.channel_data["channel"] = {"id": channel_id, "name": channel_name}
     activity.conversation = SimpleNamespace(
-        id=f"conversation-{channel_id}", tenant_id="tenant-1",
+        id=channel_id, tenant_id="tenant-1",
         conversation_type="channel", name=channel_name,
     )
     return activity
@@ -646,7 +675,7 @@ async def test_explicit_connect_registers_two_channels_without_new_install_event
 
     assert [item["channelId"] for item in captured] == ["FINAL-TEST", "FINAL2"]
     assert [item["conversationId"] for item in captured] == [
-        "conversation-FINAL-TEST", "conversation-FINAL2",
+        "FINAL-TEST", "FINAL2",
     ]
     assert all(item["teamId"] == "team-1" for item in captured)
     assert first.sent == [

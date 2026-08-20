@@ -41,7 +41,11 @@ from app.config import get_settings
 from app.services.n8n_service import N8nActionWebhookError, N8nService
 from app.storage.idempotency_store import idempotency_store
 from app.utils.logger import get_logger, log_event
-from app.utils.teams_context import channel_metadata_diagnostic, extract_teams_context
+from app.utils.teams_context import (
+    channel_metadata_diagnostic,
+    extract_teams_context,
+    has_authoritative_channel_conversation,
+)
 
 logger = get_logger(__name__)
 
@@ -130,32 +134,19 @@ async def capture_channel_destination_from_activity(
     """Register only activity contexts that identify a real Teams channel."""
     context = extract_teams_context(activity)
     diagnostic = channel_metadata_diagnostic(activity)
-    verified_channel = bool(
-        context["tenantId"]
-        and context["teamId"]
-        and context["channelId"]
-        and context["conversationId"]
-        and context["serviceUrl"]
-        and (
-            diagnostic["has_channel"]
-            or diagnostic["conversation_type"] == "channel"
-        )
-    )
+    verified_channel = has_authoritative_channel_conversation(activity)
     if not verified_channel:
+        if context["channelId"] and context["conversationId"]:
+            log_event(
+                logger, "teams_channel_identity_unsupported", level=30,
+                tenant_id=context["tenantId"], team_id=context["teamId"],
+                channel_id=context["channelId"],
+                conversation_id=context["conversationId"],
+                event_type=diagnostic["event_type"],
+            )
         return DestinationRegistrationResult(False, error="InvalidTeamsChannelContext")
 
     conversation_id = context["conversationId"]
-    if conversation_id == context["teamId"] and context["channelId"] != context["teamId"]:
-        log_event(
-            logger,
-            "teams_channel_identity_unsupported",
-            level=30,
-            tenant_id=context["tenantId"],
-            team_id=context["teamId"],
-            channel_id=context["channelId"],
-            conversation_id=conversation_id,
-        )
-        return DestinationRegistrationResult(False, error="TeamLevelConversationIdentity")
 
     payload = {
         "tenantId": context["tenantId"],
@@ -352,12 +343,24 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
 
 
 async def handle_conversation_update(context: TurnContext, state: TurnState) -> None:
-    """Keep the legacy add signal on the shared registration path."""
+    """Treat channel-created events as discovery, never as sendable routes."""
+    diagnostic = channel_metadata_diagnostic(context.activity)
+    activity_context = extract_teams_context(context.activity)
+    if (diagnostic["event_type"] or "").lower() == "channelcreated":
+        log_event(
+            logger, "teams_channel_discovered",
+            tenant_id=activity_context["tenantId"],
+            team_id=activity_context["teamId"],
+            channel_id=activity_context["channelId"],
+            conversation_id=activity_context["conversationId"],
+            event_type=diagnostic["event_type"],
+            channel_name=activity_context["channelName"],
+        )
+        return
     await conversation_service.capture_from_turn_context(context)
     await register_installation_from_activity(context.activity)
     await capture_channel_destination_from_activity(context.activity)
 
-    activity_context = extract_teams_context(context.activity)
     log_event(
         logger,
         "conversationUpdate received",

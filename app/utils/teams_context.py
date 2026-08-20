@@ -40,7 +40,23 @@ def channel_metadata_diagnostic(activity: Any) -> dict[str, Any]:
         "has_channel_name": bool(resolution_source),
         "conversation_type": conversation_type,
         "resolution_source": resolution_source,
+        "event_type": _first_value(channel_data, "event_type", "eventType"),
     }
+
+
+def has_authoritative_channel_conversation(activity: Any) -> bool:
+    """True only for the channel identity shape proven by an incoming activity."""
+    context = extract_teams_context(activity)
+    diagnostic = channel_metadata_diagnostic(activity)
+    return bool(
+        context["tenantId"]
+        and context["teamId"]
+        and context["channelId"]
+        and context["conversationId"]
+        and context["serviceUrl"]
+        and diagnostic["conversation_type"] == "channel"
+        and context["conversationId"] == context["channelId"]
+    )
 
 
 def extract_teams_context(activity: Any) -> dict[str, Any]:

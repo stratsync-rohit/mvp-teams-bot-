@@ -19,7 +19,10 @@ from app.storage.conversation_store import (
     conversation_store,
 )
 from app.utils.logger import get_logger, log_event
-from app.utils.teams_context import extract_teams_context
+from app.utils.teams_context import (
+    extract_teams_context,
+    has_authoritative_channel_conversation,
+)
 
 logger = get_logger(__name__)
 
@@ -44,7 +47,7 @@ class ConversationService:
         conversation_id = context["conversationId"]
         service_url = context["serviceUrl"]
 
-        if not (team_id and channel_id and conversation_id and service_url):
+        if not has_authoritative_channel_conversation(turn_context.activity):
             # Not enough Teams context to register a channel reference
             # (e.g. a 1:1 chat install event) - nothing to store.
             return

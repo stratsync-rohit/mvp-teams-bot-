@@ -37,23 +37,9 @@ async def send_to_conversation(
     destination_id: str | None = None,
 ) -> str:
     """Send a card into a Teams-provided conversation reference."""
-    if (
-        team_id
-        and channel_id
-        and conversation_id == team_id
-        and channel_id != team_id
-    ):
-        conversation_id = channel_id
-        log_event(
-            logger,
-            "teams_channel_conversation_normalized",
-            level=30,
-            event_id=event_id,
-            destination_id=destination_id,
-            tenant_id=tenant_id,
-            team_id=team_id,
-            channel_id=channel_id,
-            conversation_id=conversation_id,
+    if team_id and channel_id and conversation_id != channel_id:
+        raise ChannelNotRegisteredError(
+            "Stored Teams conversation is not authoritative for this channel"
         )
     settings = get_settings()
     message_activity = Activity(
