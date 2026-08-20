@@ -76,13 +76,16 @@ async def disconnect_teams_installation(
     tenant_id: str,
     *,
     team_id: str | None = None,
+    channel_id: str | None = None,
     conversation_id: str | None = None,
+    scope: Literal["team", "channel"] = "team",
 ) -> TeamsDisconnectResult:
     """Soft-disconnect one Teams installation through the backend lifecycle API."""
     settings = get_settings()
     safe_context = {
         "tenant_id": tenant_id,
         "team_id": team_id,
+        "channel_id": channel_id,
         "conversation_id": conversation_id,
     }
     if not settings.INTERNAL_API_KEY:
@@ -95,12 +98,16 @@ async def disconnect_teams_installation(
         )
         return "failed"
 
-    payload = {"tenantId": tenant_id}
+    payload = {"tenantId": tenant_id, "scope": scope}
     if team_id:
         payload["teamId"] = team_id
+    if channel_id:
+        payload["channelId"] = channel_id
     if conversation_id:
         payload["conversationId"] = conversation_id
-    if len(payload) == 1:
+    if (scope == "channel" and not (team_id and channel_id)) or (
+        scope == "team" and not (team_id or conversation_id)
+    ):
         log_event(
             logger,
             "teams_installation_disconnect_failed",

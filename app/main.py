@@ -21,8 +21,7 @@ settings = get_settings()
 configure_logging(settings.LOG_LEVEL)
 logger = get_logger(__name__)
 
-# Register AgentApplication routes (conversationUpdate capture, Adaptive
-# Card action handling) once at import time.
+
 register_handlers()
 
 

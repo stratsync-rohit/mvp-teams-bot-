@@ -194,11 +194,15 @@ async def disconnect_installation_from_activity(activity) -> bool:
     safe_context = {
         "tenant_id": context["tenantId"],
         "team_id": context["teamId"],
+        "channel_id": context["channelId"],
         "conversation_id": context["conversationId"],
     }
     log_event(logger, "teams_app_removal_received", **safe_context)
-    if not context["tenantId"] or not (
-        context["teamId"] or context["conversationId"]
+    scope = "channel" if context["teamId"] and context["channelId"] else "team"
+    if not context["tenantId"] or (
+        scope == "channel" and not (context["teamId"] and context["channelId"])
+    ) or (
+        scope == "team" and not (context["teamId"] or context["conversationId"])
     ):
         log_event(
             logger,
@@ -214,7 +218,9 @@ async def disconnect_installation_from_activity(activity) -> bool:
         result = await disconnect_teams_installation(
             context["tenantId"],
             team_id=context["teamId"],
+            channel_id=context["channelId"],
             conversation_id=context["conversationId"],
+            scope=scope,
         )
     except Exception as exc:  # lifecycle sync must not break activity processing
         log_event(

@@ -38,11 +38,15 @@ def conversation_named_channel_activity():
     return activity
 
 
-def removal_activity(*, tenant_id="tenant-1", team_id="team-1", conversation_id="conversation-1"):
+def removal_activity(*, tenant_id="tenant-1", team_id="team-1", channel_id=None,
+                     conversation_id="conversation-1"):
+    channel_data = {"tenant": {"id": tenant_id}, "team": {"id": team_id}}
+    if channel_id:
+        channel_data["channel"] = {"id": channel_id}
     return SimpleNamespace(
         type="installationUpdate",
         action="remove",
-        channel_data={"tenant": {"id": tenant_id}, "team": {"id": team_id}},
+        channel_data=channel_data,
         conversation=SimpleNamespace(id=conversation_id, tenant_id=tenant_id),
         service_url="https://smba.trafficmanager.net/emea/",
     )
@@ -196,7 +200,9 @@ async def test_removal_forwards_only_teams_context(monkeypatch):
     assert captured == {
         "tenant_id": "TENANT-A",
         "team_id": "TEAM-A",
+        "channel_id": None,
         "conversation_id": "CONV-A",
+        "scope": "team",
     }
     assert "accountId" not in captured
     assert "account_id" not in captured
@@ -215,6 +221,7 @@ async def test_removal_without_team_uses_conversation(monkeypatch):
         removal_activity(team_id=None)
     ) is True
     assert captured["team_id"] is None
+    assert captured["scope"] == "team"
     assert captured["conversation_id"] == "conversation-1"
 
 
@@ -272,9 +279,28 @@ async def test_backend_disconnect_payload_and_internal_key(monkeypatch):
         "tenantId": "TENANT-A",
         "teamId": "TEAM-A",
         "conversationId": "CONV-A",
+        "scope": "team",
     }
     assert captured["headers"] == {"X-Internal-API-Key": "test-internal-key"}
     assert "accountId" not in captured["json"]
+
+
+@pytest.mark.asyncio
+async def test_channel_removal_forwards_explicit_channel_scope(monkeypatch):
+    captured = {}
+
+    async def disconnect(tenant_id, **kwargs):
+        captured.update(tenant_id=tenant_id, **kwargs)
+        return "disconnected"
+
+    monkeypatch.setattr(activity_handler, "disconnect_teams_installation", disconnect)
+    handled = await activity_handler.disconnect_installation_from_activity(
+        removal_activity(team_id="TEAM-A", channel_id="CHANNEL-A")
+    )
+    assert handled is True
+    assert captured["scope"] == "channel"
+    assert captured["team_id"] == "TEAM-A"
+    assert captured["channel_id"] == "CHANNEL-A"
 
 
 @pytest.mark.asyncio
