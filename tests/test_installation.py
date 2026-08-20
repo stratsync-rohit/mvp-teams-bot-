@@ -200,7 +200,6 @@ async def test_removal_forwards_only_teams_context(monkeypatch):
     assert captured == {
         "tenant_id": "TENANT-A",
         "team_id": "TEAM-A",
-        "channel_id": None,
         "conversation_id": "CONV-A",
         "scope": "team",
     }
@@ -286,7 +285,7 @@ async def test_backend_disconnect_payload_and_internal_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_channel_removal_forwards_explicit_channel_scope(monkeypatch):
+async def test_lifecycle_removal_stays_team_scoped_with_incidental_channel(monkeypatch):
     captured = {}
 
     async def disconnect(tenant_id, **kwargs):
@@ -298,9 +297,9 @@ async def test_channel_removal_forwards_explicit_channel_scope(monkeypatch):
         removal_activity(team_id="TEAM-A", channel_id="CHANNEL-A")
     )
     assert handled is True
-    assert captured["scope"] == "channel"
+    assert captured["scope"] == "team"
     assert captured["team_id"] == "TEAM-A"
-    assert captured["channel_id"] == "CHANNEL-A"
+    assert captured.get("channel_id") is None
 
 
 @pytest.mark.asyncio
@@ -544,14 +543,11 @@ async def test_backend_destination_client_uses_internal_endpoint(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("incoming_conversation", ["team-1", None])
-async def test_verified_channel_normalizes_team_or_missing_conversation(
+async def test_channel_registration_rejects_non_authoritative_conversation(
     monkeypatch, incoming_conversation, caplog
 ):
-    captured = {}
-
     async def register(payload):
-        captured.update(payload)
-        return True
+        raise AssertionError("invalid conversation identity must not be registered")
 
     monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = sample_activity(with_metadata=True)
@@ -562,9 +558,9 @@ async def test_verified_channel_normalizes_team_or_missing_conversation(
         conversation_type="channel",
     )
     with caplog.at_level("WARNING"):
-        assert await activity_handler.capture_channel_destination_from_activity(activity)
-    assert captured["conversationId"] == captured["channelId"] == "channel-1"
-    assert "teams_channel_conversation_normalized" in caplog.text
+        assert not await activity_handler.capture_channel_destination_from_activity(activity)
+    if incoming_conversation == "team-1":
+        assert "teams_channel_identity_unsupported" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -582,3 +578,141 @@ async def test_non_channel_conversations_are_not_normalized_or_registered(
         id="team-1", tenant_id="tenant-1", conversation_type=conversation_type
     )
     assert not await activity_handler.capture_channel_destination_from_activity(activity)
+
+
+class MessageContext:
+    def __init__(self, activity):
+        self.activity = activity
+        self.sent = []
+
+    async def send_activity(self, activity):
+        self.sent.append(activity)
+
+
+def channel_message(channel_id, channel_name, text="<at>StratSync</at> connect"):
+    activity = sample_activity(with_metadata=True, with_actor=True)
+    activity.text = text
+    activity.channel_data["channel"] = {"id": channel_id, "name": channel_name}
+    activity.conversation = SimpleNamespace(
+        id=f"conversation-{channel_id}", tenant_id="tenant-1",
+        conversation_type="channel", name=channel_name,
+    )
+    return activity
+
+
+@pytest.mark.asyncio
+async def test_explicit_connect_registers_two_channels_without_new_install_event(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return True
+
+    async def capture(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    first = MessageContext(channel_message("FINAL-TEST", "final test"))
+    second = MessageContext(channel_message("FINAL2", "final2", text="connect"))
+    await activity_handler.handle_message(first, SimpleNamespace())
+    await activity_handler.handle_message(second, SimpleNamespace())
+
+    assert [item["channelId"] for item in captured] == ["FINAL-TEST", "FINAL2"]
+    assert [item["conversationId"] for item in captured] == [
+        "conversation-FINAL-TEST", "conversation-FINAL2",
+    ]
+    assert all(item["teamId"] == "team-1" for item in captured)
+    assert first.sent == [
+        "Channel connected successfully. StratSync can now send notifications here."
+    ]
+    assert second.sent == first.sent
+
+
+@pytest.mark.asyncio
+async def test_reconnect_same_channel_sends_same_logical_identity(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return True
+
+    async def capture(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    for _ in range(2):
+        await activity_handler.handle_message(
+            MessageContext(channel_message("FINAL2", "final2")), SimpleNamespace()
+        )
+    assert len(captured) == 2
+    assert {
+        field: captured[0][field]
+        for field in ("tenantId", "teamId", "channelId")
+    } == {
+        field: captured[1][field]
+        for field in ("tenantId", "teamId", "channelId")
+    }
+
+
+@pytest.mark.asyncio
+async def test_ordinary_message_does_not_register_channel(monkeypatch):
+    async def unexpected(payload):
+        raise AssertionError("ordinary channel messages must not register destinations")
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    context = MessageContext(channel_message("FINAL2", "final2", text="hello bot"))
+    await activity_handler.handle_message(context, SimpleNamespace())
+    assert context.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conversation_type", ["personal", "groupChat"])
+async def test_connect_command_from_non_channel_chat_is_rejected(
+    monkeypatch, conversation_type
+):
+    async def unexpected(payload):
+        raise AssertionError("chat activity must not register a Team channel")
+
+    async def capture(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "capture_from_turn_context", capture
+    )
+    activity = sample_activity()
+    activity.text = "connect"
+    activity.channel_data.pop("team")
+    activity.conversation = SimpleNamespace(
+        id="chat-1", tenant_id="tenant-1", conversation_type=conversation_type,
+    )
+    context = MessageContext(activity)
+    await activity_handler.handle_message(context, SimpleNamespace())
+    assert context.sent == [
+        "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_disconnect_uses_exact_channel_scope(monkeypatch):
+    captured = {}
+
+    async def disconnect(tenant_id, **kwargs):
+        captured.update(tenant_id=tenant_id, **kwargs)
+        return "disconnected"
+
+    monkeypatch.setattr(activity_handler, "disconnect_teams_installation", disconnect)
+    context = MessageContext(
+        channel_message("FINAL2", "final2", text="<at>StratSync</at> disconnect")
+    )
+    await activity_handler.handle_message(context, SimpleNamespace())
+    assert captured["scope"] == "channel"
+    assert captured["team_id"] == "team-1"
+    assert captured["channel_id"] == "FINAL2"
+    assert context.sent == ["Channel disconnected successfully."]

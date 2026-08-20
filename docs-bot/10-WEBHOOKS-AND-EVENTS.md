@@ -7,7 +7,7 @@
 | Teams | `installationUpdate/add` | `/api/messages` → `handle_installation_update` | Capture reference; register installation/destination |
 | Teams | `installationUpdate/remove` | same | Backend soft-disconnect |
 | Teams | `conversationUpdate` | `handle_conversation_update` | Same registration path |
-| Teams | `message` | registered `on_message` | Register channel destination when context proves channel scope |
+| Teams | `message`: `connect` / `disconnect` | registered `on_message` | Explicitly register or disconnect the exact channel |
 | Teams | `invoke` / `adaptiveCard/action` | `handle_invoke` | Forward action to n8n and synchronously acknowledge |
 | n8n | `initial_notification` | `/api/notifications` | Render and proactively send initial card |
 | n8n | `risk_action_result` | same | Render and send follow-up card |

@@ -17,6 +17,8 @@ Two responsibilities live here:
 
 from __future__ import annotations
 
+import html
+import re
 import uuid
 
 from microsoft_agents.activity import (
@@ -45,6 +47,8 @@ logger = get_logger(__name__)
 n8n_service = N8nService()
 
 ADAPTIVE_CARD_ACTION_NAME = "adaptiveCard/action"
+CONNECT_COMMAND = "connect"
+DISCONNECT_COMMAND = "disconnect"
 
 
 async def register_installation_from_activity(activity) -> bool:
@@ -127,6 +131,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         context["tenantId"]
         and context["teamId"]
         and context["channelId"]
+        and context["conversationId"]
         and context["serviceUrl"]
         and (
             diagnostic["has_channel"]
@@ -137,20 +142,17 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         return False
 
     conversation_id = context["conversationId"]
-    if not conversation_id or (
-        conversation_id == context["teamId"]
-        and context["channelId"] != context["teamId"]
-    ):
-        conversation_id = context["channelId"]
+    if conversation_id == context["teamId"] and context["channelId"] != context["teamId"]:
         log_event(
             logger,
-            "teams_channel_conversation_normalized",
+            "teams_channel_identity_unsupported",
             level=30,
             tenant_id=context["tenantId"],
             team_id=context["teamId"],
             channel_id=context["channelId"],
             conversation_id=conversation_id,
         )
+        return False
 
     payload = {
         "tenantId": context["tenantId"],
@@ -168,7 +170,7 @@ async def capture_channel_destination_from_activity(activity) -> bool:
         "channel_id": context["channelId"],
         "conversation_id": conversation_id,
     }
-    log_event(logger, "teams_channel_destination_detected", **safe_context)
+    log_event(logger, "teams_channel_identity_detected", **safe_context)
     log_event(
         logger, "teams_channel_destination_registration_requested", **safe_context
     )
@@ -188,6 +190,82 @@ async def capture_channel_destination_from_activity(activity) -> bool:
     return registered
 
 
+def _message_command(activity) -> str | None:
+    """Extract a bare command while tolerating the Teams bot mention markup."""
+    text = html.unescape(getattr(activity, "text", None) or "")
+    text = re.sub(r"<at>.*?</at>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    command = " ".join(text.strip().lower().split())
+    return command if command in {CONNECT_COMMAND, DISCONNECT_COMMAND} else None
+
+
+async def disconnect_channel_from_activity(activity) -> bool:
+    """Disconnect only the exact channel represented by this Teams activity."""
+    context = extract_teams_context(activity)
+    diagnostic = channel_metadata_diagnostic(activity)
+    safe_context = {
+        "tenant_id": context["tenantId"], "team_id": context["teamId"],
+        "channel_id": context["channelId"],
+        "conversation_id": context["conversationId"],
+        **diagnostic,
+    }
+    if not (
+        context["tenantId"] and context["teamId"] and context["channelId"]
+        and (
+            diagnostic["has_channel"]
+            or diagnostic["conversation_type"] == "channel"
+        )
+    ):
+        return False
+    log_event(logger, "teams_channel_disconnect_requested", **safe_context)
+    result = await disconnect_teams_installation(
+        context["tenantId"], team_id=context["teamId"],
+        channel_id=context["channelId"], conversation_id=context["conversationId"],
+        scope="channel",
+    )
+    return result in ("disconnected", "not_found")
+
+
+async def handle_message(context: TurnContext, state: TurnState) -> None:
+    """Handle explicit channel connection commands; ignore ordinary messages."""
+    command = _message_command(context.activity)
+    if command is None:
+        return
+
+    activity_context = extract_teams_context(context.activity)
+    log_event(
+        logger, "teams_channel_connect_requested" if command == CONNECT_COMMAND
+        else "teams_channel_disconnect_requested",
+        tenant_id=activity_context["tenantId"], team_id=activity_context["teamId"],
+        channel_id=activity_context["channelId"],
+        conversation_id=activity_context["conversationId"],
+    )
+    if command == CONNECT_COMMAND:
+        await conversation_service.capture_from_turn_context(context)
+        successful = await capture_channel_destination_from_activity(context.activity)
+        message = (
+            "Channel connected successfully. StratSync can now send notifications here."
+            if successful else
+            "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
+        )
+    else:
+        try:
+            successful = await disconnect_channel_from_activity(context.activity)
+        except Exception as exc:
+            log_event(
+                logger, "teams_channel_disconnect_failed", level=40,
+                error_type=type(exc).__name__, tenant_id=activity_context["tenantId"],
+                team_id=activity_context["teamId"], channel_id=activity_context["channelId"],
+                conversation_id=activity_context["conversationId"],
+            )
+            successful = False
+        message = (
+            "Channel disconnected successfully."
+            if successful else
+            "This command must be sent from a connected Microsoft Teams channel."
+        )
+    await context.send_activity(message)
+
+
 async def disconnect_installation_from_activity(activity) -> bool:
     """Forward a Teams-issued removal identity without trusting an account ID."""
     context = extract_teams_context(activity)
@@ -198,11 +276,12 @@ async def disconnect_installation_from_activity(activity) -> bool:
         "conversation_id": context["conversationId"],
     }
     log_event(logger, "teams_app_removal_received", **safe_context)
-    scope = "channel" if context["teamId"] and context["channelId"] else "team"
-    if not context["tenantId"] or (
-        scope == "channel" and not (context["teamId"] and context["channelId"])
-    ) or (
-        scope == "team" and not (context["teamId"] or context["conversationId"])
+    # installationUpdate/remove represents app lifecycle. Treat it as Team-scoped
+    # even if Teams includes incidental channel metadata; only an explicit
+    # in-channel disconnect command is allowed to remove one destination.
+    scope = "team"
+    if not context["tenantId"] or not (
+        context["teamId"] or context["conversationId"]
     ):
         log_event(
             logger,
@@ -218,7 +297,6 @@ async def disconnect_installation_from_activity(activity) -> bool:
         result = await disconnect_teams_installation(
             context["tenantId"],
             team_id=context["teamId"],
-            channel_id=context["channelId"],
             conversation_id=context["conversationId"],
             scope=scope,
         )
@@ -294,7 +372,7 @@ def register_handlers() -> None:
 
     @agent_app.activity(ActivityTypes.message)
     async def on_message(context: TurnContext, state: TurnState) -> None:
-        await capture_channel_destination_from_activity(context.activity)
+        await handle_message(context, state)
 
     @agent_app.activity(ActivityTypes.invoke)
     async def on_invoke(context: TurnContext, state: TurnState) -> None:

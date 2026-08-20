@@ -44,3 +44,5 @@ Teams posts an authenticated invoke to `/api/messages`; the Agents SDK dispatche
 ## Installation lifecycle
 
 Add and conversation-update events capture a local reference, register the installation, and conditionally register a real channel destination. Remove events call the backend disconnect endpoint. All backend synchronization is best-effort so its failure does not fail Teams activity handling.
+
+Because installation is Team-scoped, additional channels are connected explicitly. A user sends `@StratSync connect` in the target channel; `handle_message` validates channel scope, captures that exact Microsoft conversation reference, and registers the channel destination. Ordinary messages and personal/group chats do not register destinations. `@StratSync disconnect` disables only the current channel.
