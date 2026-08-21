@@ -407,6 +407,39 @@ async def test_installation_update_add_reuses_registration_flow(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_team_level_install_does_not_register_team_as_channel(monkeypatch, caplog):
+    calls = []
+
+    async def register_installation(activity):
+        calls.append("installation")
+        return True
+
+    async def unexpected(payload):
+        raise AssertionError("Team lifecycle identity must not become a destination")
+
+    monkeypatch.setattr(
+        activity_handler, "register_installation_from_activity", register_installation
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    activity = sample_activity()
+    activity.action = "add"
+    activity.channel_data["team"] = {"id": "team-1", "name": "f-test"}
+    activity.channel_data["channel"] = {"id": "team-1"}
+    activity.conversation = SimpleNamespace(
+        id="team-1", tenant_id="tenant-1", conversation_type="channel"
+    )
+
+    with caplog.at_level("INFO"):
+        await activity_handler.handle_installation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+
+    assert calls == ["installation"]
+    assert extract_teams_context(activity)["channelId"] is None
+    assert "teams_team_level_channel_registration_skipped" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_conversation_update_reuses_registration_flow(monkeypatch):
     calls = []
 
@@ -448,6 +481,8 @@ async def test_channel_created_resolves_team_scoped_conversation_with_microsoft(
     )
     monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = sample_activity(with_metadata=True)
+    activity.channel_data["team"] = {"id": "team-1", "name": "f-test"}
+    activity.channel_data["channel"] = {"id": "channel-1", "name": "test1"}
     activity.channel_data["eventType"] = "channelCreated"
     activity.conversation.id = "team-1"
 
@@ -462,6 +497,8 @@ async def test_channel_created_resolves_team_scoped_conversation_with_microsoft(
         "service_url": "https://smba.trafficmanager.net/emea/",
     }
     assert captured["payload"]["conversationId"] == "microsoft-returned-conversation"
+    assert captured["payload"]["teamName"] == "f-test"
+    assert captured["payload"]["channelName"] == "test1"
     assert captured["payload"]["conversationResolutionSource"] == "microsoft_create_conversation"
     assert "teams_channel_conversation_resolved" in caplog.text
     assert "teams_channel_auto_registered" in caplog.text

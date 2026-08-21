@@ -57,19 +57,36 @@ def channel_metadata_diagnostic(activity: Any) -> dict[str, Any]:
 def resolve_authoritative_channel(activity: Any) -> tuple[Any, str | None]:
     """Resolve a channel only from Teams fields that explicitly identify one."""
     channel_data = _first_value(activity, "channel_data", "channelData") or {}
+    team = _value(channel_data, "team") or {}
+    team_id = _value(team, "id") or _first_value(
+        channel_data, "teams_team_id", "teamsTeamId"
+    )
     channel = _value(channel_data, "channel")
     settings = _value(channel_data, "settings") or {}
     selected_in_settings = _first_value(settings, "selected_channel", "selectedChannel")
     selected_direct = _first_value(channel_data, "selected_channel", "selectedChannel")
+    channel_id = _value(channel, "id")
+    # Teams' General channel may legitimately share the Team ID, but a
+    # Team-scoped lifecycle event can expose that same ID as incidental channel
+    # data. Require an explicit channel name for this ambiguous equal-ID shape.
+    explicit_channel_id = channel_id if (
+        channel_id != team_id or _value(channel, "name")
+    ) else None
     candidates = (
-        (_value(channel, "id"), "channelData.channel.id"),
+        (explicit_channel_id, "channelData.channel.id"),
         (_first_value(channel_data, "teams_channel_id", "teamsChannelId"),
          "channelData.teamsChannelId"),
         (_value(selected_in_settings, "id"),
          "channelData.settings.selectedChannel.id"),
         (_value(selected_direct, "id"), "channelData.selectedChannel.id"),
     )
-    return next(((value, source) for value, source in candidates if value), (None, None))
+    return next(
+        (
+            (value, source) for value, source in candidates
+            if value and (value != team_id or source == "channelData.channel.id")
+        ),
+        (None, None),
+    )
 
 
 def has_authoritative_channel_conversation(activity: Any) -> bool:

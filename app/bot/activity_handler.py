@@ -344,6 +344,16 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
         await disconnect_installation_from_activity(context.activity)
     elif action == "add":
         await register_installation_from_activity(context.activity)
+        activity_context = extract_teams_context(context.activity)
+        if not activity_context["channelId"]:
+            log_event(
+                logger, "teams_team_level_channel_registration_skipped",
+                tenant_id=activity_context["tenantId"],
+                team_id=activity_context["teamId"],
+                conversation_id=activity_context["conversationId"],
+                trigger="installation_add",
+                reason="real_channel_metadata_missing",
+            )
         await capture_channel_destination_from_activity(
             context.activity, trigger="installation_add",
         )
