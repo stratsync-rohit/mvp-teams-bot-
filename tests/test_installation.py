@@ -430,12 +430,22 @@ async def test_conversation_update_reuses_registration_flow(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_channel_created_does_not_fabricate_team_scoped_conversation(
+async def test_channel_created_resolves_team_scoped_conversation_with_microsoft(
     monkeypatch, caplog
 ):
-    async def register(payload):
-        raise AssertionError("Team-scoped channelCreated must not register a route")
+    captured = {}
 
+    async def resolve(**kwargs):
+        captured["resolution"] = kwargs
+        return "microsoft-returned-conversation"
+
+    async def register(payload):
+        captured["payload"] = payload
+        return backend_client.DestinationRegistrationResult(True, 200, "destination-42")
+
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "resolve_channel_conversation", resolve
+    )
     monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = sample_activity(with_metadata=True)
     activity.channel_data["eventType"] = "channelCreated"
@@ -446,9 +456,39 @@ async def test_channel_created_does_not_fabricate_team_scoped_conversation(
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
 
-    assert "teams_channel_auto_registration_skipped" in caplog.text
-    assert "teams_channel_conversation_normalized" not in caplog.text
-    assert "teams_channel_auto_registered" not in caplog.text
+    assert captured["resolution"] == {
+        "tenant_id": "tenant-1", "team_id": "team-1",
+        "channel_id": "channel-1",
+        "service_url": "https://smba.trafficmanager.net/emea/",
+    }
+    assert captured["payload"]["conversationId"] == "microsoft-returned-conversation"
+    assert captured["payload"]["conversationResolutionSource"] == "microsoft_create_conversation"
+    assert "teams_channel_conversation_resolved" in caplog.text
+    assert "teams_channel_auto_registered" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_channel_created_resolution_failure_does_not_register(monkeypatch, caplog):
+    async def fail(**kwargs):
+        raise RuntimeError("connector unavailable")
+
+    async def unexpected(payload):
+        raise AssertionError("failed resolution must not persist a destination")
+
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "resolve_channel_conversation", fail
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["eventType"] = "channelCreated"
+    activity.conversation.id = "team-1"
+
+    with caplog.at_level("INFO"):
+        await activity_handler.handle_conversation_update(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+
+    assert "teams_channel_conversation_resolution_failed" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.bot import proactive_sender
+from app.services import conversation_service as conversation_service_module
 
 
 @pytest.mark.asyncio
@@ -46,7 +47,7 @@ async def test_send_continues_supplied_conversation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_rejects_malformed_team_conversation(monkeypatch):
+async def test_send_continues_microsoft_resolved_conversation_id(monkeypatch):
     captured = {}
 
     class FakeTurnContext:
@@ -64,15 +65,56 @@ async def test_send_rejects_malformed_team_conversation(monkeypatch):
         "get_settings",
         lambda: SimpleNamespace(MICROSOFT_APP_ID="bot-app-id"),
     )
-    with pytest.raises(proactive_sender.ChannelNotRegisteredError):
-        await proactive_sender.send_to_conversation(
-            tenant_id="tenant-1",
-            team_id="team-1",
-            channel_id="channel-r-test",
-            conversation_id="team-1",
-            destination_id="destination-r-test",
-            event_id="event-1",
-            service_url="https://smba.trafficmanager.net/apac/",
-            card={"type": "AdaptiveCard", "version": "1.5", "body": []},
-        )
-    assert captured == {}
+    await proactive_sender.send_to_conversation(
+        tenant_id="tenant-1",
+        team_id="team-1",
+        channel_id="channel-r-test",
+        conversation_id="microsoft-returned-thread-id",
+        destination_id="destination-r-test",
+        event_id="event-1",
+        service_url="https://smba.trafficmanager.net/apac/",
+        card={"type": "AdaptiveCard", "version": "1.5", "body": []},
+    )
+    assert captured["continuation_activity"].conversation.id == "microsoft-returned-thread-id"
+
+
+@pytest.mark.asyncio
+async def test_channel_conversation_resolution_uses_sdk_returned_id(monkeypatch):
+    captured = {}
+
+    class FakeAdapter:
+        async def create_conversation(self, **kwargs):
+            captured.update(kwargs)
+            await kwargs["callback"](SimpleNamespace(
+                activity=SimpleNamespace(
+                    conversation=SimpleNamespace(id="microsoft-conversation-42")
+                )
+            ))
+
+    monkeypatch.setattr(conversation_service_module, "adapter", FakeAdapter())
+    monkeypatch.setattr(
+        conversation_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(MICROSOFT_APP_ID="bot-app-id"),
+    )
+    service = conversation_service_module.ConversationService()
+
+    result = await service.resolve_channel_conversation(
+        tenant_id="tenant-1", team_id="team-1", channel_id="channel-42",
+        service_url="https://smba.trafficmanager.net/apac/",
+    )
+
+    assert result == "microsoft-conversation-42"
+    assert captured["channel_id"] == "msteams"
+    assert captured["service_url"] == "https://smba.trafficmanager.net/apac/"
+    assert captured["audience"] == "https://api.botframework.com/.default"
+    parameters = captured["conversation_parameters"]
+    assert parameters.tenant_id == "tenant-1"
+    assert parameters.channel_data == {
+        "tenant": {"id": "tenant-1"},
+        "team": {"id": "team-1"},
+        "channel": {"id": "channel-42"},
+        "teamsTeamId": "team-1",
+        "teamsChannelId": "channel-42",
+    }
+    assert parameters.activity.type == "message"

@@ -363,9 +363,79 @@ async def handle_conversation_update(context: TurnContext, state: TurnState) -> 
             event_type=diagnostic["event_type"],
             channel_name=activity_context["channelName"],
         )
-        await capture_channel_destination_from_activity(
-            context.activity, trigger="channel_created",
+        if has_authoritative_channel_conversation(context.activity):
+            await capture_channel_destination_from_activity(
+                context.activity, trigger="channel_created",
+            )
+            return
+        safe_context = {
+            "tenant_id": activity_context["tenantId"],
+            "team_id": activity_context["teamId"],
+            "channel_id": activity_context["channelId"],
+            "source_conversation_id": activity_context["conversationId"],
+            "resolution_source": "microsoft_create_conversation",
+        }
+        required = (
+            activity_context["tenantId"], activity_context["teamId"],
+            activity_context["channelId"], activity_context["serviceUrl"],
         )
+        if not all(required):
+            log_event(logger, "teams_channel_auto_registration_skipped",
+                      skip_reason="channel_discovery_context_missing", **safe_context)
+            return
+        log_event(logger, "teams_channel_conversation_resolution_started", **safe_context)
+        try:
+            resolved_conversation_id = (
+                await conversation_service.resolve_channel_conversation(
+                    tenant_id=activity_context["tenantId"],
+                    team_id=activity_context["teamId"],
+                    channel_id=activity_context["channelId"],
+                    service_url=activity_context["serviceUrl"],
+                )
+            )
+            log_event(
+                logger, "teams_channel_conversation_resolved",
+                resolved_conversation_id=resolved_conversation_id, **safe_context,
+            )
+            payload = {
+                "tenantId": activity_context["tenantId"],
+                "teamId": activity_context["teamId"],
+                "teamName": activity_context["teamName"],
+                "channelId": activity_context["channelId"],
+                "channelName": activity_context["channelName"],
+                "conversationId": resolved_conversation_id,
+                "serviceUrl": activity_context["serviceUrl"],
+                "connectedByName": activity_context["connectedByName"],
+                "registrationTrigger": "channel_created",
+                "conversationResolutionSource": "microsoft_create_conversation",
+            }
+            result = await register_teams_destination(payload)
+            if isinstance(result, bool):
+                result = DestinationRegistrationResult(result)
+            if result and result.enabled is not False:
+                await conversation_service.save_channel_context({
+                    **activity_context,
+                    "destinationConversationId": resolved_conversation_id,
+                })
+                log_event(
+                    logger, "teams_channel_auto_registered",
+                    destination_id=result.destination_id,
+                    backend_status=result.status_code,
+                    resolved_conversation_id=resolved_conversation_id,
+                    **safe_context,
+                )
+            else:
+                log_event(
+                    logger, "teams_channel_auto_registration_skipped",
+                    skip_reason=(result.disconnect_reason or "backend_rejected"),
+                    resolved_conversation_id=resolved_conversation_id,
+                    **safe_context,
+                )
+        except Exception as exc:
+            log_event(
+                logger, "teams_channel_conversation_resolution_failed", level=40,
+                error_type=type(exc).__name__, **safe_context,
+            )
         return
     await register_installation_from_activity(context.activity)
     await capture_channel_destination_from_activity(

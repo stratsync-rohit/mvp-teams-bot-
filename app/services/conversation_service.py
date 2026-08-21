@@ -11,8 +11,17 @@ from __future__ import annotations
 
 from typing import Optional
 
+from microsoft_agents.activity import (
+    Activity,
+    ActivityTypes,
+    ChannelAccount,
+    Channels,
+    ConversationParameters,
+)
 from microsoft_agents.hosting.core import TurnContext
 
+from app.bot.teams_bot import adapter
+from app.config import get_settings
 from app.storage.conversation_store import (
     ChannelConversationReference,
     ConversationStore,
@@ -93,6 +102,51 @@ class ConversationService:
         self, team_id: str, channel_id: str
     ) -> Optional[ChannelConversationReference]:
         return await self._store.get(team_id, channel_id)
+
+    async def resolve_channel_conversation(
+        self,
+        *,
+        tenant_id: str,
+        team_id: str,
+        channel_id: str,
+        service_url: str,
+    ) -> str:
+        """Create a real Teams channel thread and return Microsoft's route ID."""
+        settings = get_settings()
+        resolved_conversation_id: str | None = None
+
+        async def capture_created_conversation(turn_context: TurnContext) -> None:
+            nonlocal resolved_conversation_id
+            conversation = getattr(turn_context.activity, "conversation", None)
+            resolved_conversation_id = getattr(conversation, "id", None)
+
+        parameters = ConversationParameters(
+            is_group=True,
+            agent=ChannelAccount(id=settings.MICROSOFT_APP_ID),
+            tenant_id=tenant_id,
+            channel_data={
+                "tenant": {"id": tenant_id},
+                "team": {"id": team_id},
+                "channel": {"id": channel_id},
+                "teamsTeamId": team_id,
+                "teamsChannelId": channel_id,
+            },
+            activity=Activity(
+                type=ActivityTypes.message,
+                text="StratSync is ready to deliver risk notifications to this channel.",
+            ),
+        )
+        await adapter.create_conversation(
+            agent_app_id=settings.MICROSOFT_APP_ID,
+            channel_id=Channels.ms_teams,
+            service_url=service_url,
+            audience="https://api.botframework.com/.default",
+            conversation_parameters=parameters,
+            callback=capture_created_conversation,
+        )
+        if not resolved_conversation_id:
+            raise RuntimeError("Microsoft did not return a conversation ID")
+        return resolved_conversation_id
 
 
 conversation_service = ConversationService()
