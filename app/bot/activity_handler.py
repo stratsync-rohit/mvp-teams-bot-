@@ -282,15 +282,47 @@ async def handle_message(context: TurnContext, state: TurnState) -> None:
         conversation_id=activity_context["conversationId"],
     )
     if command == CONNECT_COMMAND:
+        if has_authoritative_channel_conversation(activity):
+            log_event(
+                logger, "teams_connect_context_validated",
+                tenant_id=activity_context["tenantId"],
+                team_id=activity_context["teamId"],
+                channel_id=activity_context["channelId"],
+                conversation_id=activity_context["conversationId"],
+            )
         result = await capture_channel_destination_from_activity(
             activity, trigger="explicit_connect"
         )
         if result:
-            message = "Channel connected successfully. StratSync can now send notifications here."
+            log_event(
+                logger, "teams_connect_command_succeeded",
+                tenant_id=activity_context["tenantId"],
+                team_id=activity_context["teamId"],
+                channel_id=activity_context["channelId"],
+                conversation_id=activity_context["conversationId"],
+                destination_id=result.destination_id,
+            )
+            message = "This channel is now connected to StratSync."
         elif result.error in {"InvalidTeamsChannelContext", "TeamLevelConversationIdentity"}:
+            log_event(
+                logger, "teams_connect_command_failed", level=30,
+                tenant_id=activity_context["tenantId"],
+                team_id=activity_context["teamId"],
+                channel_id=activity_context["channelId"],
+                conversation_id=activity_context["conversationId"],
+                failure_reason="invalid_channel_context",
+            )
             message = "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
         else:
-            message = "StratSync could not connect this channel because backend registration failed. Please try again or contact support."
+            log_event(
+                logger, "teams_connect_command_failed", level=40,
+                tenant_id=activity_context["tenantId"],
+                team_id=activity_context["teamId"],
+                channel_id=activity_context["channelId"],
+                conversation_id=activity_context["conversationId"],
+                failure_reason="registration_failed",
+            )
+            message = "Unable to connect this channel to StratSync. Please try again."
     else:
         try:
             successful = await disconnect_channel_from_activity(context.activity)
@@ -385,7 +417,6 @@ async def handle_conversation_update(context: TurnContext, state: TurnState) -> 
         )
         await capture_channel_destination_from_activity(
             context.activity, trigger="channel_created",
-            allow_authoritative_channel_normalization=True,
         )
         return
     await register_installation_from_activity(context.activity)

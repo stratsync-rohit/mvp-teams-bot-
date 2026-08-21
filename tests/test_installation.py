@@ -440,14 +440,11 @@ async def test_conversation_update_reuses_registration_flow(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_channel_created_registers_authoritative_channel(monkeypatch, caplog):
-    captured = []
-
+async def test_channel_created_does_not_fabricate_team_scoped_conversation(
+    monkeypatch, caplog
+):
     async def register(payload):
-        captured.append(payload)
-        return backend_client.DestinationRegistrationResult(
-            True, status_code=200, destination_id="destination-1"
-        )
+        raise AssertionError("Team-scoped channelCreated must not register a route")
 
     monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = sample_activity(with_metadata=True)
@@ -459,20 +456,13 @@ async def test_channel_created_registers_authoritative_channel(monkeypatch, capl
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
 
-    assert captured[0]["channelId"] == "channel-1"
-    assert captured[0]["conversationId"] == "channel-1"
-    assert captured[0]["registrationTrigger"] == "channel_created"
-    reference = await activity_handler.conversation_service.get_reference(
-        "team-1", "channel-1"
-    )
-    assert reference.conversation_id == "channel-1"
-    assert reference.service_url == "https://smba.trafficmanager.net/emea/"
-    assert "teams_channel_conversation_normalized" in caplog.text
-    assert "teams_channel_auto_registered" in caplog.text
+    assert "teams_channel_auto_registration_skipped" in caplog.text
+    assert "teams_channel_conversation_normalized" not in caplog.text
+    assert "teams_channel_auto_registered" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_two_channel_created_events_in_same_team_register_independently(monkeypatch):
+async def test_two_routable_channel_created_events_register_independently(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -484,7 +474,7 @@ async def test_two_channel_created_events_in_same_team_register_independently(mo
         activity = sample_activity(with_metadata=True)
         activity.channel_data["eventType"] = "channelCreated"
         activity.channel_data["channel"] = {"id": channel_id, "name": channel_id}
-        activity.conversation.id = "team-1"
+        activity.conversation.id = channel_id
         await activity_handler.handle_conversation_update(
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
@@ -507,7 +497,6 @@ async def test_duplicate_channel_created_uses_same_backend_identity(monkeypatch)
     monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     activity = sample_activity(with_metadata=True)
     activity.channel_data["eventType"] = "channelCreated"
-    activity.conversation.id = "team-1"
     for _ in range(2):
         await activity_handler.handle_conversation_update(
             SimpleNamespace(activity=activity), SimpleNamespace()
@@ -792,9 +781,57 @@ async def test_explicit_connect_registers_two_channels_without_new_install_event
     ]
     assert all(item["teamId"] == "team-1" for item in captured)
     assert first.sent == [
-        "Channel connected successfully. StratSync can now send notifications here."
+        "This channel is now connected to StratSync."
     ]
     assert second.sent == first.sent
+
+
+@pytest.mark.asyncio
+async def test_explicit_connect_preserves_exact_context_across_teams(monkeypatch):
+    captured = []
+
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(
+            True, status_code=200, destination_id=f"destination-{len(captured)}"
+        )
+
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    contexts = []
+    for team_id, team_name, channel_id in (
+        ("TEAM-A", "Team A", "CHANNEL-A"),
+        ("TEAM-B", "Team B", "CHANNEL-B"),
+    ):
+        activity = channel_message(channel_id, "Alerts", text="CONNECT")
+        activity.channel_data["team"] = {"id": team_id, "name": team_name}
+        contexts.append(MessageContext(activity))
+
+    for context in contexts:
+        await activity_handler.handle_message(context, SimpleNamespace())
+
+    assert [{
+        field: payload[field] for field in (
+            "tenantId", "teamId", "channelId", "conversationId", "serviceUrl",
+            "teamName", "channelName", "connectedByName", "registrationTrigger",
+        )
+    } for payload in captured] == [
+        {
+            "tenantId": "tenant-1", "teamId": "TEAM-A",
+            "channelId": "CHANNEL-A", "conversationId": "CHANNEL-A",
+            "serviceUrl": "https://smba.trafficmanager.net/emea/",
+            "teamName": "Team A", "channelName": "Alerts",
+            "connectedByName": "Installation Actor",
+            "registrationTrigger": "explicit_connect",
+        },
+        {
+            "tenantId": "tenant-1", "teamId": "TEAM-B",
+            "channelId": "CHANNEL-B", "conversationId": "CHANNEL-B",
+            "serviceUrl": "https://smba.trafficmanager.net/emea/",
+            "teamName": "Team B", "channelName": "Alerts",
+            "connectedByName": "Installation Actor",
+            "registrationTrigger": "explicit_connect",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -842,7 +879,7 @@ async def test_backend_4xx_is_surfaced_to_connect_user(monkeypatch):
     context = MessageContext(channel_message("FINAL2", "final2"))
     await activity_handler.handle_message(context, SimpleNamespace())
     assert context.sent == [
-        "StratSync could not connect this channel because backend registration failed. Please try again or contact support."
+        "Unable to connect this channel to StratSync. Please try again."
     ]
 
 
