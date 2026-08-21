@@ -298,9 +298,10 @@ are outside this repository:
    ID and required scopes (`team` scope, so it can be installed into a
    Team), and package + upload/publish it to your tenant (Teams admin
    center or org app catalog).
-4. **Install the Teams app into the target Team** - this triggers the
-   `conversationUpdate` event this bot listens for and registers the real
-   `tenantId`, `conversationId`, and `serviceUrl`. n8n must return those
+4. **Install the Teams app into the target Team/channel** - the bot registers
+   only an `installationUpdate/add` or `conversationUpdate` carrying a real
+   channel conversation where `conversation.id` equals the selected channel
+   ID. n8n must return the stored `tenantId`, `conversationId`, and `serviceUrl`
    registered values in `POST /api/notifications` for proactive delivery.
 5. **Grant the bot's Azure AD app the standard Bot Framework Connector
    permissions** (this is typically handled automatically by the Azure Bot
@@ -334,5 +335,5 @@ Verify live lifecycle activity without exposing secrets:
 
 ```bash
 docker logs -f risk-teams-bot 2>&1 | grep --line-buffered -E \
-  'teams_channel_auto_registration_(started|failed|skipped)|teams_channel_conversation_normalized|teams_channel_auto_registered|teams_app_removal_received|teams_installation_(received|registered|disconnect_)'
+  'teams_channel_auto_registration_(started|failed|skipped)|teams_channel_auto_registered|teams_app_removal_received|teams_installation_(received|registered|disconnect_)'
 ```

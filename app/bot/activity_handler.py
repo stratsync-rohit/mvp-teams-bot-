@@ -52,7 +52,6 @@ logger = get_logger(__name__)
 n8n_service = N8nService()
 
 ADAPTIVE_CARD_ACTION_NAME = "adaptiveCard/action"
-CONNECT_COMMAND = "connect"
 DISCONNECT_COMMAND = "disconnect"
 
 
@@ -129,8 +128,7 @@ async def register_installation_from_activity(activity) -> bool:
 
 
 async def capture_channel_destination_from_activity(
-    activity, *, trigger: str = "explicit_connect",
-    allow_authoritative_channel_normalization: bool = False,
+    activity, *, trigger: str = "lifecycle",
 ) -> DestinationRegistrationResult:
     """Capture and register one authoritative Teams channel idempotently."""
     context = extract_teams_context(activity)
@@ -156,19 +154,14 @@ async def capture_channel_destination_from_activity(
                   skip_reason="authoritative_channel_context_missing", **safe_context)
         return DestinationRegistrationResult(False, error="InvalidTeamsChannelContext")
     verified_channel = has_authoritative_channel_conversation(activity)
-    if verified_channel:
-        conversation_id = source_conversation_id
-    elif allow_authoritative_channel_normalization:
-        conversation_id = context["channelId"]
-    else:
+    if not verified_channel:
         log_event(logger, "teams_channel_auto_registration_skipped",
                   skip_reason="conversation_is_not_channel", **safe_context)
         return DestinationRegistrationResult(False, error="InvalidTeamsChannelContext")
+    conversation_id = source_conversation_id
 
     safe_context["destination_conversation_id"] = conversation_id
     log_event(logger, "teams_channel_auto_registration_started", **safe_context)
-    if conversation_id != source_conversation_id:
-        log_event(logger, "teams_channel_conversation_normalized", **safe_context)
     payload = {
         "tenantId": context["tenantId"],
         "teamId": context["teamId"],
@@ -223,7 +216,7 @@ def _message_command(activity) -> str | None:
         r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE | re.DOTALL
     )
     command = " ".join(text.strip().lower().split())
-    return command if command in {CONNECT_COMMAND, DISCONNECT_COMMAND} else None
+    return command if command == DISCONNECT_COMMAND else None
 
 
 async def disconnect_channel_from_activity(activity) -> bool:
@@ -254,7 +247,7 @@ async def disconnect_channel_from_activity(activity) -> bool:
 
 
 async def handle_message(context: TurnContext, state: TurnState) -> None:
-    """Handle explicit channel connection commands; ignore ordinary messages."""
+    """Handle the existing disconnect command; lifecycle events own connection."""
     activity = context.activity
     raw_text = html.unescape(getattr(activity, "text", None) or "")
     command = _message_command(activity)
@@ -262,7 +255,7 @@ async def handle_message(context: TurnContext, state: TurnState) -> None:
         diagnostic = channel_metadata_diagnostic(activity)
         activity_context = extract_teams_context(activity)
         log_event(
-            logger, "teams_connect_command_received",
+            logger, "teams_disconnect_command_received",
             activity_type=getattr(activity, "type", None), raw_text=raw_text,
             normalized_command=command,
             tenant_id=activity_context["tenantId"], team_id=activity_context["teamId"],
@@ -275,70 +268,26 @@ async def handle_message(context: TurnContext, state: TurnState) -> None:
 
     activity_context = extract_teams_context(activity)
     log_event(
-        logger, "teams_channel_connect_requested" if command == CONNECT_COMMAND
-        else "teams_channel_disconnect_requested",
+        logger, "teams_channel_disconnect_requested",
         tenant_id=activity_context["tenantId"], team_id=activity_context["teamId"],
         channel_id=activity_context["channelId"],
         conversation_id=activity_context["conversationId"],
     )
-    if command == CONNECT_COMMAND:
-        if has_authoritative_channel_conversation(activity):
-            log_event(
-                logger, "teams_connect_context_validated",
-                tenant_id=activity_context["tenantId"],
-                team_id=activity_context["teamId"],
-                channel_id=activity_context["channelId"],
-                conversation_id=activity_context["conversationId"],
-            )
-        result = await capture_channel_destination_from_activity(
-            activity, trigger="explicit_connect"
+    try:
+        successful = await disconnect_channel_from_activity(context.activity)
+    except Exception as exc:
+        log_event(
+            logger, "teams_channel_disconnect_failed", level=40,
+            error_type=type(exc).__name__, tenant_id=activity_context["tenantId"],
+            team_id=activity_context["teamId"], channel_id=activity_context["channelId"],
+            conversation_id=activity_context["conversationId"],
         )
-        if result:
-            log_event(
-                logger, "teams_connect_command_succeeded",
-                tenant_id=activity_context["tenantId"],
-                team_id=activity_context["teamId"],
-                channel_id=activity_context["channelId"],
-                conversation_id=activity_context["conversationId"],
-                destination_id=result.destination_id,
-            )
-            message = "This channel is now connected to StratSync."
-        elif result.error in {"InvalidTeamsChannelContext", "TeamLevelConversationIdentity"}:
-            log_event(
-                logger, "teams_connect_command_failed", level=30,
-                tenant_id=activity_context["tenantId"],
-                team_id=activity_context["teamId"],
-                channel_id=activity_context["channelId"],
-                conversation_id=activity_context["conversationId"],
-                failure_reason="invalid_channel_context",
-            )
-            message = "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
-        else:
-            log_event(
-                logger, "teams_connect_command_failed", level=40,
-                tenant_id=activity_context["tenantId"],
-                team_id=activity_context["teamId"],
-                channel_id=activity_context["channelId"],
-                conversation_id=activity_context["conversationId"],
-                failure_reason="registration_failed",
-            )
-            message = "Unable to connect this channel to StratSync. Please try again."
-    else:
-        try:
-            successful = await disconnect_channel_from_activity(context.activity)
-        except Exception as exc:
-            log_event(
-                logger, "teams_channel_disconnect_failed", level=40,
-                error_type=type(exc).__name__, tenant_id=activity_context["tenantId"],
-                team_id=activity_context["teamId"], channel_id=activity_context["channelId"],
-                conversation_id=activity_context["conversationId"],
-            )
-            successful = False
-        message = (
-            "Channel disconnected successfully."
-            if successful else
-            "This command must be sent from a connected Microsoft Teams channel."
-        )
+        successful = False
+    message = (
+        "Channel disconnected successfully."
+        if successful else
+        "This command must be sent from a connected Microsoft Teams channel."
+    )
     await context.send_activity(message)
 
 
@@ -397,7 +346,6 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
         await register_installation_from_activity(context.activity)
         await capture_channel_destination_from_activity(
             context.activity, trigger="installation_add",
-            allow_authoritative_channel_normalization=True,
         )
 
 

@@ -111,18 +111,11 @@ def test_existing_teams_fallback_ids_still_work():
     assert result["channelName"] is None
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "<at>StratSync</at> connect",
-        '<at id="0">StratSync</at> connect',
-        "  <AT ID='0'>StratSync</AT>   CoNnEcT  ",
-    ],
-)
-def test_connect_command_strips_teams_mention_variants(text):
+@pytest.mark.parametrize("text", ["connect", "<at>StratSync</at> connect"])
+def test_connect_command_is_not_supported(text):
     activity = sample_activity(with_metadata=True)
     activity.text = text
-    assert activity_handler._message_command(activity) == "connect"
+    assert activity_handler._message_command(activity) is None
 
 
 @pytest.mark.asyncio
@@ -409,10 +402,7 @@ async def test_installation_update_add_reuses_registration_flow(monkeypatch):
     await activity_handler.handle_installation_update(context, SimpleNamespace())
     assert calls == [
         "register",
-        ("destination", {
-            "trigger": "installation_add",
-            "allow_authoritative_channel_normalization": True,
-        }),
+        ("destination", {"trigger": "installation_add"}),
     ]
 
 
@@ -508,15 +498,13 @@ async def test_duplicate_channel_created_uses_same_backend_identity(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_installation_selected_channel_is_normalized_and_registered(monkeypatch):
-    captured = []
+async def test_team_scoped_installation_selected_channel_is_not_fabricated(monkeypatch):
 
     async def register_installation(activity):
         return True
 
     async def register_destination(payload):
-        captured.append(payload)
-        return True
+        raise AssertionError("team-scoped conversation must not become a channel route")
 
     monkeypatch.setattr(
         activity_handler, "register_installation_from_activity", register_installation
@@ -532,10 +520,78 @@ async def test_installation_selected_channel_is_normalized_and_registered(monkey
         SimpleNamespace(activity=activity), SimpleNamespace()
     )
 
-    assert captured[0]["channelId"] == "selected-channel"
-    assert captured[0]["channelName"] == "Selected"
-    assert captured[0]["conversationId"] == "selected-channel"
-    assert captured[0]["registrationTrigger"] == "installation_add"
+    # The selected channel is metadata only when Teams supplied the team ID as
+    # the conversation ID. Registration must wait for an exact channel route.
+
+
+@pytest.mark.asyncio
+async def test_installation_add_with_exact_selected_channel_registers(monkeypatch):
+    captured = []
+
+    async def register_installation(activity):
+        return True
+
+    async def register_destination(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(
+            True, 200, "fresh-destination"
+        )
+
+    monkeypatch.setattr(
+        activity_handler, "register_installation_from_activity", register_installation
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
+    activity = sample_activity()
+    activity.action = "add"
+    activity.channel_data["settings"] = {
+        "selectedChannel": {"id": "selected-channel", "name": "Selected"}
+    }
+    activity.conversation = SimpleNamespace(
+        id="selected-channel", tenant_id="tenant-1", conversation_type="channel"
+    )
+
+    await activity_handler.handle_installation_update(
+        SimpleNamespace(activity=activity), SimpleNamespace()
+    )
+
+    assert captured == [{
+        "tenantId": "tenant-1",
+        "teamId": "team-1",
+        "teamName": None,
+        "channelId": "selected-channel",
+        "channelName": "Selected",
+        "conversationId": "selected-channel",
+        "serviceUrl": "https://smba.trafficmanager.net/emea/",
+        "connectedByName": None,
+        "registrationTrigger": "installation_add",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_installation_adds_use_same_destination_identity(monkeypatch):
+    identities = []
+
+    async def register_installation(activity):
+        return True
+
+    async def register_destination(payload):
+        identities.append(tuple(
+            payload[field] for field in ("tenantId", "teamId", "channelId")
+        ))
+        return backend_client.DestinationRegistrationResult(True, 200, "same-destination")
+
+    monkeypatch.setattr(
+        activity_handler, "register_installation_from_activity", register_installation
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
+    activity = sample_activity(with_metadata=True)
+    activity.action = "add"
+    context = SimpleNamespace(activity=activity)
+
+    await activity_handler.handle_installation_update(context, SimpleNamespace())
+    await activity_handler.handle_installation_update(context, SimpleNamespace())
+
+    assert identities == [("tenant-1", "team-1", "channel-1")] * 2
 
 
 @pytest.mark.asyncio
@@ -756,7 +812,7 @@ def channel_message(channel_id, channel_name, text="<at>StratSync</at> connect")
 
 
 @pytest.mark.asyncio
-async def test_explicit_connect_registers_two_channels_without_new_install_event(monkeypatch):
+async def test_connect_messages_do_not_register_channels(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -775,19 +831,13 @@ async def test_explicit_connect_registers_two_channels_without_new_install_event
     await activity_handler.handle_message(first, SimpleNamespace())
     await activity_handler.handle_message(second, SimpleNamespace())
 
-    assert [item["channelId"] for item in captured] == ["FINAL-TEST", "FINAL2"]
-    assert [item["conversationId"] for item in captured] == [
-        "FINAL-TEST", "FINAL2",
-    ]
-    assert all(item["teamId"] == "team-1" for item in captured)
-    assert first.sent == [
-        "This channel is now connected to StratSync."
-    ]
-    assert second.sent == first.sent
+    assert captured == []
+    assert first.sent == []
+    assert second.sent == []
 
 
 @pytest.mark.asyncio
-async def test_explicit_connect_preserves_exact_context_across_teams(monkeypatch):
+async def test_connect_messages_do_not_register_across_teams(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -809,33 +859,12 @@ async def test_explicit_connect_preserves_exact_context_across_teams(monkeypatch
     for context in contexts:
         await activity_handler.handle_message(context, SimpleNamespace())
 
-    assert [{
-        field: payload[field] for field in (
-            "tenantId", "teamId", "channelId", "conversationId", "serviceUrl",
-            "teamName", "channelName", "connectedByName", "registrationTrigger",
-        )
-    } for payload in captured] == [
-        {
-            "tenantId": "tenant-1", "teamId": "TEAM-A",
-            "channelId": "CHANNEL-A", "conversationId": "CHANNEL-A",
-            "serviceUrl": "https://smba.trafficmanager.net/emea/",
-            "teamName": "Team A", "channelName": "Alerts",
-            "connectedByName": "Installation Actor",
-            "registrationTrigger": "explicit_connect",
-        },
-        {
-            "tenantId": "tenant-1", "teamId": "TEAM-B",
-            "channelId": "CHANNEL-B", "conversationId": "CHANNEL-B",
-            "serviceUrl": "https://smba.trafficmanager.net/emea/",
-            "teamName": "Team B", "channelName": "Alerts",
-            "connectedByName": "Installation Actor",
-            "registrationTrigger": "explicit_connect",
-        },
-    ]
+    assert captured == []
+    assert all(context.sent == [] for context in contexts)
 
 
 @pytest.mark.asyncio
-async def test_explicit_connect_registers_three_channels_in_same_team(monkeypatch):
+async def test_connect_messages_do_not_register_same_team_channels(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -858,12 +887,12 @@ async def test_explicit_connect_registers_three_channels_in_same_team(monkeypatc
     for context in contexts:
         await activity_handler.handle_message(context, SimpleNamespace())
 
-    assert [item["channelId"] for item in captured] == ["FINAL-TEST", "FINAL2", "R2"]
-    assert len({item["conversationId"] for item in captured}) == 3
+    assert captured == []
+    assert all(context.sent == [] for context in contexts)
 
 
 @pytest.mark.asyncio
-async def test_backend_4xx_is_surfaced_to_connect_user(monkeypatch):
+async def test_connect_message_never_calls_backend(monkeypatch):
     async def register(payload):
         return backend_client.DestinationRegistrationResult(
             False, status_code=422, error="HTTPStatusError"
@@ -878,13 +907,11 @@ async def test_backend_4xx_is_surfaced_to_connect_user(monkeypatch):
     )
     context = MessageContext(channel_message("FINAL2", "final2"))
     await activity_handler.handle_message(context, SimpleNamespace())
-    assert context.sent == [
-        "Unable to connect this channel to StratSync. Please try again."
-    ]
+    assert context.sent == []
 
 
 @pytest.mark.asyncio
-async def test_reconnect_same_channel_sends_same_logical_identity(monkeypatch):
+async def test_reconnect_is_not_driven_by_message_command(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -902,14 +929,7 @@ async def test_reconnect_same_channel_sends_same_logical_identity(monkeypatch):
         await activity_handler.handle_message(
             MessageContext(channel_message("FINAL2", "final2")), SimpleNamespace()
         )
-    assert len(captured) == 2
-    assert {
-        field: captured[0][field]
-        for field in ("tenantId", "teamId", "channelId")
-    } == {
-        field: captured[1][field]
-        for field in ("tenantId", "teamId", "channelId")
-    }
+    assert captured == []
 
 
 @pytest.mark.asyncio
@@ -925,7 +945,7 @@ async def test_ordinary_message_does_not_register_channel(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("conversation_type", ["personal", "groupChat"])
-async def test_connect_command_from_non_channel_chat_is_rejected(
+async def test_connect_command_from_non_channel_chat_is_ignored(
     monkeypatch, conversation_type
 ):
     async def unexpected(payload):
@@ -946,9 +966,7 @@ async def test_connect_command_from_non_channel_chat_is_rejected(
     )
     context = MessageContext(activity)
     await activity_handler.handle_message(context, SimpleNamespace())
-    assert context.sent == [
-        "This command must be sent from a Microsoft Teams channel where the StratSync bot is available."
-    ]
+    assert context.sent == []
 
 
 @pytest.mark.asyncio
