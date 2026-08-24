@@ -164,8 +164,17 @@ bot app credentials, preferring `channelData.team.aadGroupId` (`GET /groups`)
 and falling back to the explicit `team.id` (`GET /teams`). It never constructs a
 name from an ID. The Entra app therefore needs application permission
 `GroupMember.Read.All` for group lookup and `Team.ReadBasic.All` for the Team-ID
-fallback, with admin consent. A lookup failure leaves the name null and does not
+fallback, plus `Channel.ReadBasic.All` for installed-Team channel reconciliation,
+all with admin consent. `ChannelMember.Read.Group` is not used. A lookup failure leaves the name null and does not
 interrupt channel discovery.
+
+After an installation is persisted, the bot asks the backend to synchronize the
+installed Team. The backend calls the bot's credentialed Graph proxy, lists
+`GET /teams/{teamId}/channels?$select=id,displayName,membershipType`, and upserts
+standard channels as available discovery records. Private and shared channels
+are skipped. The same reconciliation is available through
+`POST /api/teams/channels/{accountId}/sync`; normal channel-list GET requests do
+not call Graph.
 Disconnect requests require `INTERNAL_API_KEY`. If it is missing, the bot logs a
 safe failure and does not make an unauthenticated lifecycle request. Backend
 errors and already-disconnected responses do not crash Teams activity handling.

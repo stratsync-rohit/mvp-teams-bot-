@@ -37,6 +37,7 @@ from app.services.backend_client import (
     register_teams_destination,
     register_teams_installation,
     record_discovered_teams_channel,
+    sync_teams_channels,
 )
 from app.config import get_settings
 from app.services.n8n_service import N8nActionWebhookError, N8nService
@@ -127,6 +128,8 @@ async def register_installation_from_activity(activity) -> bool:
             team_id=payload["teamId"],
             conversation_id=payload["conversationId"],
         )
+        if isinstance(registered, str):
+            await sync_teams_channels(registered)
     return registered
 
 

@@ -182,6 +182,23 @@ async def test_registration_payload_uses_tenant_without_account(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_successful_team_installation_triggers_channel_sync(monkeypatch):
+    synced = []
+
+    async def successful_registration(payload):
+        return "ACC-001"
+
+    async def sync(account_id):
+        synced.append(account_id)
+        return True
+
+    monkeypatch.setattr(activity_handler, "register_teams_installation", successful_registration)
+    monkeypatch.setattr(activity_handler, "sync_teams_channels", sync)
+    assert await activity_handler.register_installation_from_activity(sample_activity()) == "ACC-001"
+    assert synced == ["ACC-001"]
+
+
+@pytest.mark.asyncio
 async def test_registration_passes_optional_channel_and_actor_metadata(monkeypatch):
     captured = {}
 

@@ -25,7 +25,7 @@ class DestinationRegistrationResult:
         return self.success
 
 
-async def register_teams_installation(payload: dict[str, Any]) -> bool:
+async def register_teams_installation(payload: dict[str, Any]) -> str | bool:
     settings = get_settings()
     headers = {}
     if settings.INTERNAL_API_KEY:
@@ -46,6 +46,7 @@ async def register_teams_installation(payload: dict[str, Any]) -> bool:
                 )
                 return False
             response.raise_for_status()
+            body = response.json()
     except (httpx.HTTPError, ValueError) as exc:
         log_event(
             logger,
@@ -56,6 +57,23 @@ async def register_teams_installation(payload: dict[str, Any]) -> bool:
             conversation_id=payload.get("conversationId"),
             error_type=type(exc).__name__,
         )
+        return False
+    return (body.get("installation") or {}).get("accountId") or True
+
+
+async def sync_teams_channels(account_id: str) -> bool:
+    settings = get_settings()
+    headers = {"X-Internal-API-Key": settings.INTERNAL_API_KEY} if settings.INTERNAL_API_KEY else {}
+    try:
+        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/channels/{account_id}/sync",
+                headers=headers,
+            )
+            response.raise_for_status()
+    except (httpx.HTTPError, ValueError) as exc:
+        log_event(logger, "teams_channel_sync_failed", level=40,
+                  account_id=account_id, error_type=type(exc).__name__)
         return False
     return True
 
