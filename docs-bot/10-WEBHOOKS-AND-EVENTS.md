@@ -4,10 +4,10 @@
 
 | Source | Event | Entry point | Outcome |
 |---|---|---|---|
-| Teams | `installationUpdate/add` | `/api/messages` → `handle_installation_update` | Capture reference; register installation/destination |
+| Teams | `installationUpdate/add` | `/api/messages` → `handle_installation_update` | Register installation; register destination only for explicit selected channel |
 | Teams | `installationUpdate/remove` | same | Backend soft-disconnect |
-| Teams | `conversationUpdate` | `handle_conversation_update` | Same registration path |
-| Teams | `message`: `connect` / `disconnect` | registered `on_message` | Explicitly register or disconnect the exact channel |
+| Teams | `conversationUpdate` | `handle_conversation_update` | Installation metadata/discovery only; never register destination |
+| Teams | `message`: `disconnect` | registered `on_message` | Disconnect the exact channel |
 | Teams | `invoke` / `adaptiveCard/action` | `handle_invoke` | Forward action to n8n and synchronously acknowledge |
 | n8n | `initial_notification` | `/api/notifications` | Render and proactively send initial card |
 | n8n | `risk_action_result` | same | Render and send follow-up card |
@@ -32,7 +32,7 @@ flowchart TD
   E[Teams lifecycle activity] --> X[extract_teams_context]
   X -->|add/update| L[local conversation capture]
   X -->|team context| I[POST backend installations]
-  X -->|proven channel context| D[POST backend channel-destinations]
+  X -->|add with explicit selectedChannel| D[POST backend channel-destinations]
   X -->|remove| R[POST backend installations/disconnect]
   I --> OK[Log result; never fail Teams processing]
   D --> OK

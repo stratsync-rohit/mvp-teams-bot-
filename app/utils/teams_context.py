@@ -89,6 +89,27 @@ def resolve_authoritative_channel(activity: Any) -> tuple[Any, str | None]:
     )
 
 
+def resolve_explicit_selected_channel(activity: Any) -> tuple[Any, Any, str | None]:
+    """Return the channel explicitly selected in the Teams installation UI.
+
+    Unlike general channel-context extraction, an explicitly selected General
+    channel is allowed to have the same identifier as its Team.
+    """
+    channel_data = _first_value(activity, "channel_data", "channelData") or {}
+    settings = _value(channel_data, "settings") or {}
+    candidates = (
+        (_first_value(settings, "selected_channel", "selectedChannel"),
+         "channelData.settings.selectedChannel.id"),
+        (_first_value(channel_data, "selected_channel", "selectedChannel"),
+         "channelData.selectedChannel.id"),
+    )
+    for selected, source in candidates:
+        selected_id = _value(selected, "id")
+        if selected_id:
+            return selected_id, _value(selected, "name"), source
+    return None, None, None
+
+
 def has_authoritative_channel_conversation(activity: Any) -> bool:
     """True only for the channel identity shape proven by an incoming activity."""
     context = extract_teams_context(activity)

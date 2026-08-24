@@ -142,8 +142,8 @@ interrupt Teams activity processing.
 The Microsoft Agents SDK routes Teams `installationUpdate` activities through
 `AgentApplication.activity(ActivityTypes.installation_update)`:
 
-- `action: add` reuses the existing installation registration path. The existing
-  `conversationUpdate` registration remains available for the Teams add flow.
+- `action: add` always registers the Team installation, but creates a channel
+  destination only when the payload contains an explicit `selectedChannel`.
 - `action: remove` sends `tenantId` and the available `teamId` and/or
   `conversationId` to `POST /api/teams/installations/disconnect`.
 
@@ -167,25 +167,27 @@ repair that confirmed stale installation through the backend disconnect API.
 ## Channel destinations
 
 Team/app lifecycle and notification destinations are intentionally separate.
-When a channel-specific `conversationUpdate`, `channelCreated`,
-`installationUpdate/add`, or explicit fallback `connect` command contains an
-authoritative Teams channel field, the bot registers it through the internal
+Only an `installationUpdate/add` containing an explicit channel selection from
+the Teams installation UI registers a destination through the internal
 `POST /api/teams/channel-destinations` endpoint. The bot never supplies an
-`accountId`; the backend resolves tenant ownership.
+`accountId`; the backend resolves tenant ownership. A `channelCreated` event is
+logged as discovery only and never calls Microsoft `create_conversation` or the
+destination endpoint. Other `conversationUpdate` activities may update Team
+installation metadata but never create a channel destination.
 
-The authoritative sources are `channelData.channel.id`,
-`channelData.teamsChannelId`, `channelData.settings.selectedChannel.id`, and
-`channelData.selectedChannel.id` (including SDK snake-case forms). For
-`channelCreated` and installation-selected-channel events, the incoming activity
-conversation may be the Team ID; after the channel field is verified, only the
-destination route is normalized so `conversationId = channelId`. The raw source
-conversation ID remains available in structured logs. Team-level activities
-without one of these channel fields never create a destination.
+The authoritative explicit-selection sources are
+`channelData.settings.selectedChannel.id` and
+`channelData.selectedChannel.id` (including SDK snake-case forms). If the
+selected-channel installation activity does not contain an exact routable
+channel conversation, the bot may call Microsoft `create_conversation` only
+after that explicit selection has been proven. A Team-level installation with
+no selected channel never creates a destination. General is supported when its
+explicit selected-channel ID equals the Team ID.
 
-The `connect` and `disconnect` commands remain backward-compatible fallbacks.
-An automatic retry does not reactivate a destination explicitly removed in the
-StratSync UI; an explicit `connect` is required. Personal/group chats and channel
-remove/delete events are rejected.
+The `disconnect` command remains a backward-compatible fallback. Reconnecting
+from the StratSync UI re-enables the same destination record and does not require
+a Teams reinstall. Lifecycle discovery never reactivates a manually disconnected
+destination. Personal/group chats and channel remove/delete events are rejected.
 
 Without Microsoft Graph, the bot cannot enumerate every channel that existed
 before installation unless Microsoft Teams sends an authoritative

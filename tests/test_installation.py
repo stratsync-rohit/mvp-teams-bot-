@@ -380,7 +380,7 @@ async def test_installation_update_remove_uses_disconnect_flow(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_installation_update_add_reuses_registration_flow(monkeypatch):
+async def test_team_installation_add_only_registers_installation(monkeypatch):
     calls = []
 
     async def register(activity):
@@ -400,10 +400,7 @@ async def test_installation_update_add_reuses_registration_flow(monkeypatch):
     activity.action = "add"
     context = SimpleNamespace(activity=activity)
     await activity_handler.handle_installation_update(context, SimpleNamespace())
-    assert calls == [
-        "register",
-        ("destination", {"trigger": "installation_add"}),
-    ]
+    assert calls == ["register"]
 
 
 @pytest.mark.asyncio
@@ -440,7 +437,7 @@ async def test_team_level_install_does_not_register_team_as_channel(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_conversation_update_reuses_registration_flow(monkeypatch):
+async def test_conversation_update_does_not_register_destination(monkeypatch):
     calls = []
 
     async def register(activity):
@@ -459,11 +456,11 @@ async def test_conversation_update_reuses_registration_flow(monkeypatch):
     await activity_handler.handle_conversation_update(
         SimpleNamespace(activity=sample_activity()), SimpleNamespace()
     )
-    assert calls == ["register", ("destination", {"trigger": "conversation_update"})]
+    assert calls == ["register"]
 
 
 @pytest.mark.asyncio
-async def test_channel_created_resolves_team_scoped_conversation_with_microsoft(
+async def test_channel_created_is_discovery_only(
     monkeypatch, caplog
 ):
     captured = {}
@@ -491,21 +488,12 @@ async def test_channel_created_resolves_team_scoped_conversation_with_microsoft(
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
 
-    assert captured["resolution"] == {
-        "tenant_id": "tenant-1", "team_id": "team-1",
-        "channel_id": "channel-1",
-        "service_url": "https://smba.trafficmanager.net/emea/",
-    }
-    assert captured["payload"]["conversationId"] == "microsoft-returned-conversation"
-    assert captured["payload"]["teamName"] == "f-test"
-    assert captured["payload"]["channelName"] == "test1"
-    assert captured["payload"]["conversationResolutionSource"] == "microsoft_create_conversation"
-    assert "teams_channel_conversation_resolved" in caplog.text
-    assert "teams_channel_auto_registered" in caplog.text
+    assert captured == {}
+    assert "teams_channel_discovered_not_connected" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_channel_created_resolution_failure_does_not_register(monkeypatch, caplog):
+async def test_channel_created_never_attempts_resolution(monkeypatch, caplog):
     async def fail(**kwargs):
         raise RuntimeError("connector unavailable")
 
@@ -525,11 +513,12 @@ async def test_channel_created_resolution_failure_does_not_register(monkeypatch,
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
 
-    assert "teams_channel_conversation_resolution_failed" in caplog.text
+    assert "teams_channel_discovered_not_connected" in caplog.text
+    assert "teams_channel_conversation_resolution_failed" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_two_routable_channel_created_events_register_independently(monkeypatch):
+async def test_two_routable_channel_created_events_never_register(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -546,15 +535,11 @@ async def test_two_routable_channel_created_events_register_independently(monkey
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
 
-    assert [(item["teamId"], item["channelId"], item["conversationId"])
-            for item in captured] == [
-        ("team-1", "channel-a", "channel-a"),
-        ("team-1", "channel-b", "channel-b"),
-    ]
+    assert captured == []
 
 
 @pytest.mark.asyncio
-async def test_duplicate_channel_created_uses_same_backend_identity(monkeypatch):
+async def test_duplicate_channel_created_never_registers(monkeypatch):
     captured = []
 
     async def register(payload):
@@ -571,22 +556,32 @@ async def test_duplicate_channel_created_uses_same_backend_identity(monkeypatch)
 
     identities = [tuple(item[field] for field in ("tenantId", "teamId", "channelId"))
                   for item in captured]
-    assert identities == [("tenant-1", "team-1", "channel-1")] * 2
+    assert identities == []
 
 
 @pytest.mark.asyncio
-async def test_team_scoped_installation_selected_channel_is_not_fabricated(monkeypatch):
+async def test_explicit_selected_channel_resolves_route_when_conversation_is_team(monkeypatch):
+
+    captured = {}
 
     async def register_installation(activity):
         return True
 
+    async def resolve(**kwargs):
+        captured["resolution"] = kwargs
+        return "resolved-channel-conversation"
+
     async def register_destination(payload):
-        raise AssertionError("team-scoped conversation must not become a channel route")
+        captured["payload"] = payload
+        return backend_client.DestinationRegistrationResult(True, 200, "destination-1")
 
     monkeypatch.setattr(
         activity_handler, "register_installation_from_activity", register_installation
     )
     monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
+    monkeypatch.setattr(
+        activity_handler.conversation_service, "resolve_channel_conversation", resolve
+    )
     activity = sample_activity()
     activity.action = "add"
     activity.channel_data["settings"] = {
@@ -597,8 +592,43 @@ async def test_team_scoped_installation_selected_channel_is_not_fabricated(monke
         SimpleNamespace(activity=activity), SimpleNamespace()
     )
 
-    # The selected channel is metadata only when Teams supplied the team ID as
-    # the conversation ID. Registration must wait for an exact channel route.
+    assert captured["resolution"]["channel_id"] == "selected-channel"
+    assert captured["payload"]["conversationId"] == "resolved-channel-conversation"
+    assert captured["payload"]["conversationResolutionSource"] == (
+        "microsoft_create_conversation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_general_selection_allows_channel_id_equal_to_team(monkeypatch):
+    captured = []
+
+    async def register_installation(activity):
+        return True
+
+    async def register_destination(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(True, 200, "general-destination")
+
+    monkeypatch.setattr(
+        activity_handler, "register_installation_from_activity", register_installation
+    )
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
+    activity = sample_activity()
+    activity.action = "add"
+    activity.channel_data["settings"] = {
+        "selectedChannel": {"id": "team-1", "name": "General"}
+    }
+    activity.conversation = SimpleNamespace(
+        id="team-1", tenant_id="tenant-1", conversation_type="channel"
+    )
+
+    await activity_handler.handle_installation_update(
+        SimpleNamespace(activity=activity), SimpleNamespace()
+    )
+
+    assert captured[0]["channelId"] == "team-1"
+    assert captured[0]["channelName"] == "General"
 
 
 @pytest.mark.asyncio
@@ -641,6 +671,7 @@ async def test_installation_add_with_exact_selected_channel_registers(monkeypatc
         "serviceUrl": "https://smba.trafficmanager.net/emea/",
         "connectedByName": None,
         "registrationTrigger": "installation_add",
+        "conversationResolutionSource": "incoming_activity",
     }]
 
 
@@ -663,6 +694,9 @@ async def test_duplicate_installation_adds_use_same_destination_identity(monkeyp
     monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
     activity = sample_activity(with_metadata=True)
     activity.action = "add"
+    activity.channel_data["settings"] = {
+        "selectedChannel": {"id": "channel-1", "name": "General"}
+    }
     context = SimpleNamespace(activity=activity)
 
     await activity_handler.handle_installation_update(context, SimpleNamespace())
