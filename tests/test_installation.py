@@ -5,7 +5,11 @@ import httpx
 
 from app.bot import activity_handler
 from app.services import backend_client
-from app.utils.teams_context import extract_teams_context
+from app.utils.teams_context import (
+    extract_explicit_install_channel,
+    extract_teams_context,
+    installation_update_diagnostic,
+)
 
 
 def sample_activity(*, with_metadata=False, with_actor=False):
@@ -54,6 +58,39 @@ def removal_activity(*, tenant_id="tenant-1", team_id="team-1", channel_id=None,
         channel_data=channel_data,
         conversation=SimpleNamespace(id=conversation_id, tenant_id=tenant_id),
         service_url="https://smba.trafficmanager.net/emea/",
+    )
+
+
+def selected_channel_install_activity(
+    channel_id="channel-1", channel_name="Risk Alerts", *, team_id="team-1",
+    direct=False, sdk_models=False,
+):
+    selected = {"id": channel_id, "name": channel_name}
+    settings = {"selectedChannel": selected}
+    channel_data = {
+        "tenant": {"id": "tenant-1"},
+        "team": {"id": team_id, "name": f"Team {team_id}"},
+        "settings": settings,
+    }
+    if direct:
+        channel_data.pop("settings")
+        channel_data["selectedChannel"] = selected
+    if sdk_models:
+        selected_model = SimpleNamespace(id=channel_id, name=channel_name)
+        channel_data = SimpleNamespace(
+            tenant=SimpleNamespace(id="tenant-1"),
+            team=SimpleNamespace(id=team_id, name=f"Team {team_id}"),
+            settings=SimpleNamespace(selected_channel=selected_model),
+            channel=None,
+            selected_channel=None,
+        )
+    return SimpleNamespace(
+        type="installationUpdate", action="add", channel_data=channel_data,
+        conversation=SimpleNamespace(
+            id=channel_id, tenant_id="tenant-1", conversation_type="channel"
+        ),
+        service_url="https://smba.trafficmanager.net/emea/",
+        from_property=None,
     )
 
 
@@ -433,6 +470,92 @@ async def test_team_level_install_does_not_register_team_as_channel(monkeypatch,
 
     assert calls == ["installation"]
     assert extract_teams_context(activity)["channelId"] is None
+
+
+@pytest.mark.parametrize(
+    "direct,sdk_models", [(False, False), (True, False), (False, True)],
+    ids=["dict-settings", "dict-direct", "sdk-model"],
+)
+def test_explicit_install_extraction_prefers_selected_channel(direct, sdk_models):
+    activity = selected_channel_install_activity(direct=direct, sdk_models=sdk_models)
+    selected = extract_explicit_install_channel(activity)
+    assert selected["channelId"] == "channel-1"
+    assert selected["channelName"] == "Risk Alerts"
+    expected_source = (
+        "channelData.selectedChannel" if direct
+        else "channelData.settings.selectedChannel"
+    )
+    assert selected["channelResolutionSource"] == expected_source
+    diagnostic = installation_update_diagnostic(activity)
+    assert diagnostic["activity_type"] == "installationUpdate"
+    expected_settings_id = None if direct else "channel-1"
+    assert diagnostic["settings_selected_channel_id"] == expected_settings_id
+
+
+@pytest.mark.asyncio
+async def test_selected_channel_install_registers_destination(monkeypatch):
+    captured = []
+
+    async def installation(activity):
+        return True
+
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(True, 200, "destination-1")
+
+    async def save(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    monkeypatch.setattr(activity_handler.conversation_service, "save_channel_context", save)
+    await activity_handler.handle_installation_update(
+        SimpleNamespace(activity=selected_channel_install_activity()), SimpleNamespace()
+    )
+    assert len(captured) == 1
+    assert captured[0]["channelId"] == "channel-1"
+    assert captured[0]["channelName"] == "Risk Alerts"
+    assert captured[0]["conversationId"] == "channel-1"
+    assert captured[0]["registrationTrigger"] == (
+        "installation_update_selected_channel"
+    )
+    assert captured[0]["conversationResolutionSource"] == (
+        "installation_update_conversation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_general_channel_install_is_supported(monkeypatch):
+    captured = []
+
+    async def installation(activity):
+        return True
+
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(True, 200, "general")
+
+    async def save(context):
+        return None
+
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    monkeypatch.setattr(activity_handler.conversation_service, "save_channel_context", save)
+    activity = selected_channel_install_activity(
+        channel_id="team-1", channel_name="General", team_id="team-1"
+    )
+    await activity_handler.handle_installation_update(
+        SimpleNamespace(activity=activity), SimpleNamespace()
+    )
+    assert captured[0]["channelId"] == "team-1"
+    assert captured[0]["channelName"] == "General"
+
+
+def test_equal_team_channel_without_named_general_is_not_explicit():
+    activity = selected_channel_install_activity(
+        channel_id="team-1", channel_name="Not General", team_id="team-1"
+    )
+    assert extract_explicit_install_channel(activity) is None
 
 
 @pytest.mark.asyncio

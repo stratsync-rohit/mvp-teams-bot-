@@ -16,6 +16,104 @@ def _first_value(source: Any, *names: str) -> Any:
     return None
 
 
+def _safe_structural_metadata(value: Any) -> Any:
+    """Serialize SDK metadata without introspecting arbitrary object state."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_structural_metadata(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_structural_metadata(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _safe_structural_metadata(model_dump(mode="json", exclude_none=True))
+    return {"runtimeType": type(value).__name__}
+
+
+def installation_update_diagnostic(activity: Any) -> dict[str, Any]:
+    """Return the complete known, non-secret installation metadata shape."""
+    channel_data = _first_value(activity, "channel_data", "channelData") or {}
+    team = _value(channel_data, "team") or {}
+    channel = _value(channel_data, "channel") or {}
+    settings = _value(channel_data, "settings") or {}
+    selected_in_settings = _first_value(settings, "selected_channel", "selectedChannel") or {}
+    selected_direct = _first_value(channel_data, "selected_channel", "selectedChannel") or {}
+    conversation = _value(activity, "conversation") or {}
+    tenant = _value(channel_data, "tenant") or {}
+    return {
+        "activity_type": _value(activity, "type"),
+        "activity_action": _value(activity, "action"),
+        "conversation_id": _value(conversation, "id"),
+        "conversation_type": _first_value(
+            conversation, "conversation_type", "conversationType"
+        ),
+        "channel_data_runtime_type": type(channel_data).__name__,
+        "team_id": _value(team, "id"),
+        "team_name": _value(team, "name"),
+        "channel_id": _value(channel, "id"),
+        "channel_name": _value(channel, "name"),
+        "settings_runtime_type": type(settings).__name__,
+        "channel_data_settings": _safe_structural_metadata(settings),
+        "settings_selected_channel_id": _value(selected_in_settings, "id"),
+        "settings_selected_channel_name": _value(selected_in_settings, "name"),
+        "selected_channel_id": _value(selected_direct, "id"),
+        "selected_channel_name": _value(selected_direct, "name"),
+        "channel_data_selected_channel": _safe_structural_metadata(selected_direct),
+        "tenant_id": _value(tenant, "id") or _first_value(
+            conversation, "tenant_id", "tenantId"
+        ),
+    }
+
+
+def extract_explicit_install_channel(activity: Any) -> dict[str, Any] | None:
+    """Extract a user-selected installation channel, never a Team-only route."""
+    context = extract_teams_context(activity)
+    channel_data = _first_value(activity, "channel_data", "channelData") or {}
+    settings = _value(channel_data, "settings") or {}
+    selected_in_settings = _first_value(settings, "selected_channel", "selectedChannel")
+    selected_direct = _first_value(channel_data, "selected_channel", "selectedChannel")
+    channel = _value(channel_data, "channel")
+    team_id = context["teamId"]
+    conversation_id = context["conversationId"]
+
+    candidates = (
+        (selected_in_settings, "channelData.settings.selectedChannel"),
+        (selected_direct, "channelData.selectedChannel"),
+        (channel, "channelData.channel"),
+    )
+    for candidate, source in candidates:
+        channel_id = _value(candidate, "id")
+        channel_name = _value(candidate, "name")
+        if not channel_id or not channel_name:
+            continue
+        if channel_id == team_id and channel_name.strip().lower() != "general":
+            continue
+        return {
+            **context,
+            "channelId": channel_id,
+            "channelName": channel_name,
+            "channelResolutionSource": source,
+            "explicitSelection": True,
+        }
+
+    # Microsoft's documented installation conversation is sufficient only when
+    # it is demonstrably not the Team route and carries a real channel name.
+    conversation = _value(activity, "conversation") or {}
+    conversation_name = _value(conversation, "name")
+    if conversation_id and conversation_id != team_id and conversation_name:
+        return {
+            **context,
+            "channelId": conversation_id,
+            "channelName": conversation_name,
+            "channelResolutionSource": "installationUpdate.conversation.id",
+            "explicitSelection": True,
+        }
+    return None
+
+
 def channel_metadata_diagnostic(activity: Any) -> dict[str, Any]:
     """Return only non-sensitive shape metadata suitable for structured logs."""
     channel_data = _first_value(activity, "channel_data", "channelData") or {}

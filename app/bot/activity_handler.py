@@ -43,8 +43,10 @@ from app.storage.idempotency_store import idempotency_store
 from app.utils.logger import get_logger, log_event
 from app.utils.teams_context import (
     channel_metadata_diagnostic,
+    extract_explicit_install_channel,
     extract_teams_context,
     has_authoritative_channel_conversation,
+    installation_update_diagnostic,
 )
 
 logger = get_logger(__name__)
@@ -343,7 +345,108 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
     if action == "remove":
         await disconnect_installation_from_activity(context.activity)
     elif action == "add":
-        await register_installation_from_activity(context.activity)
+        activity = context.activity
+        log_event(
+            logger, "teams_installation_update_add_metadata",
+            **installation_update_diagnostic(activity),
+        )
+        # Team/app lifecycle persistence is independent of channel selection and
+        # must succeed (or fail safely) before destination registration is tried.
+        installation_registered = await register_installation_from_activity(activity)
+        selected = extract_explicit_install_channel(activity)
+        if not selected:
+            team_context = extract_teams_context(activity)
+            if installation_registered:
+                log_event(
+                    logger, "teams_team_installation_registered",
+                    tenant_id=team_context["tenantId"],
+                    team_id=team_context["teamId"],
+                    conversation_id=team_context["conversationId"],
+                )
+            log_event(
+                logger, "teams_channel_registration_skipped",
+                reason="no_explicit_channel_selection",
+                tenant_id=team_context["tenantId"], team_id=team_context["teamId"],
+                conversation_id=team_context["conversationId"],
+            )
+            return
+
+        required = (
+            selected["tenantId"], selected["teamId"], selected["channelId"],
+            selected["channelName"], selected["serviceUrl"],
+        )
+        if not all(required):
+            log_event(
+                logger, "teams_channel_registration_skipped",
+                reason="explicit_channel_context_incomplete",
+                tenant_id=selected["tenantId"], team_id=selected["teamId"],
+                channel_id=selected["channelId"],
+            )
+            return
+
+        destination_conversation_id = selected["conversationId"]
+        resolution_source = "installation_update_conversation"
+        if destination_conversation_id != selected["channelId"]:
+            try:
+                destination_conversation_id = (
+                    await conversation_service.resolve_channel_conversation(
+                        tenant_id=selected["tenantId"], team_id=selected["teamId"],
+                        channel_id=selected["channelId"],
+                        service_url=selected["serviceUrl"],
+                    )
+                )
+                resolution_source = "microsoft_create_conversation"
+            except Exception as exc:
+                log_event(
+                    logger, "teams_channel_registration_skipped", level=40,
+                    reason="channel_conversation_resolution_failed",
+                    error_type=type(exc).__name__, tenant_id=selected["tenantId"],
+                    team_id=selected["teamId"], channel_id=selected["channelId"],
+                )
+                return
+
+        payload = {
+            "tenantId": selected["tenantId"], "teamId": selected["teamId"],
+            "teamName": selected["teamName"], "channelId": selected["channelId"],
+            "channelName": selected["channelName"],
+            "conversationId": destination_conversation_id,
+            "serviceUrl": selected["serviceUrl"],
+            "connectedByName": selected["connectedByName"],
+            "registrationTrigger": "installation_update_selected_channel",
+            "conversationResolutionSource": resolution_source,
+        }
+        try:
+            result = await register_teams_destination(payload)
+        except Exception as exc:
+            log_event(
+                logger, "teams_channel_registration_skipped", level=40,
+                reason="backend_exception", error_type=type(exc).__name__,
+                tenant_id=selected["tenantId"], team_id=selected["teamId"],
+                channel_id=selected["channelId"],
+            )
+            return
+        if isinstance(result, bool):
+            result = DestinationRegistrationResult(result)
+        if result and result.enabled is not False:
+            await conversation_service.save_channel_context({
+                **selected, "destinationConversationId": destination_conversation_id,
+            })
+            log_event(
+                logger, "teams_channel_destination_registered",
+                destination_id=result.destination_id, backend_status=result.status_code,
+                tenant_id=selected["tenantId"], team_id=selected["teamId"],
+                channel_id=selected["channelId"],
+                registration_trigger="installation_update_selected_channel",
+                conversation_resolution_source=resolution_source,
+            )
+        else:
+            log_event(
+                logger, "teams_channel_registration_skipped",
+                reason=(getattr(result, "disconnect_reason", None) or "backend_rejected"),
+                destination_id=getattr(result, "destination_id", None),
+                tenant_id=selected["tenantId"], team_id=selected["teamId"],
+                channel_id=selected["channelId"],
+            )
 
 
 def _activity_added_bot(activity) -> bool:
