@@ -14,7 +14,7 @@ from microsoft_agents.hosting.fastapi import (
 from app.bot.activity_handler import register_handlers
 from app.bot.teams_bot import adapter, agent_app, agent_auth_configuration
 from app.config import get_settings
-from app.routers import health, notifications
+from app.routers import channel_resolution, health, notifications
 from app.utils.logger import configure_logging, get_logger
 
 settings = get_settings()
@@ -49,6 +49,7 @@ app.state.agent_configuration = agent_auth_configuration
 
 app.include_router(health.router)
 app.include_router(notifications.router)
+app.include_router(channel_resolution.router)
 
 
 @app.post("/api/messages")

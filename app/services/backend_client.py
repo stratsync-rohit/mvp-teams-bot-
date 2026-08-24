@@ -120,6 +120,25 @@ async def register_teams_destination(
     )
 
 
+async def record_discovered_teams_channel(payload: dict[str, Any]) -> bool:
+    """Persist discovery state without creating a notification destination."""
+    settings = get_settings()
+    headers = {"X-Internal-API-Key": settings.INTERNAL_API_KEY} if settings.INTERNAL_API_KEY else {}
+    url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/channels/discover"
+    try:
+        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+    except (httpx.HTTPError, ValueError) as exc:
+        log_event(
+            logger, "teams_channel_discovery_persistence_failed", level=40,
+            tenant_id=payload.get("tenantId"), team_id=payload.get("teamId"),
+            channel_id=payload.get("channelId"), error_type=type(exc).__name__,
+        )
+        return False
+    return True
+
+
 async def disconnect_teams_installation(
     tenant_id: str,
     *,

@@ -36,6 +36,7 @@ from app.services.backend_client import (
     disconnect_teams_installation,
     register_teams_destination,
     register_teams_installation,
+    record_discovered_teams_channel,
 )
 from app.config import get_settings
 from app.services.n8n_service import N8nActionWebhookError, N8nService
@@ -591,6 +592,19 @@ async def handle_conversation_update(context: TurnContext, state: TurnState) -> 
     activity_context = extract_teams_context(context.activity)
     event_type = (diagnostic["event_type"] or "").lower()
     if event_type == "channelcreated":
+        discovery_payload = {
+            "tenantId": activity_context["tenantId"],
+            "teamId": activity_context["teamId"],
+            "teamName": activity_context["teamName"],
+            "channelId": activity_context["channelId"],
+            "channelName": activity_context["channelName"],
+            "serviceUrl": activity_context["serviceUrl"],
+            "available": True,
+        }
+        if all(discovery_payload.get(field) for field in (
+            "tenantId", "teamId", "channelId", "channelName", "serviceUrl"
+        )):
+            await record_discovered_teams_channel(discovery_payload)
         log_event(
             logger, "teams_channel_discovered_not_connected",
             tenant_id=activity_context["tenantId"],
@@ -601,6 +615,22 @@ async def handle_conversation_update(context: TurnContext, state: TurnState) -> 
             channel_name=activity_context["channelName"],
             reason="explicit_channel_install_required",
         )
+        return
+
+    if event_type in {"channeldeleted", "channelremoved"}:
+        discovery_payload = {
+            "tenantId": activity_context["tenantId"],
+            "teamId": activity_context["teamId"],
+            "teamName": activity_context["teamName"],
+            "channelId": activity_context["channelId"],
+            "channelName": activity_context["channelName"],
+            "serviceUrl": activity_context["serviceUrl"],
+            "available": False,
+        }
+        if all(discovery_payload.get(field) for field in (
+            "tenantId", "teamId", "channelId", "channelName", "serviceUrl"
+        )):
+            await record_discovered_teams_channel(discovery_payload)
         return
 
     if event_type == "channelmemberadded":

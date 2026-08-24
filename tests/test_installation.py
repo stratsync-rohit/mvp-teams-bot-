@@ -615,6 +615,50 @@ async def test_channel_created_is_discovery_only(
 
 
 @pytest.mark.asyncio
+async def test_channel_created_persists_discovery_without_destination(monkeypatch):
+    discovered = []
+
+    async def persist(payload):
+        discovered.append(payload)
+        return True
+
+    async def unexpected(payload):
+        raise AssertionError("discovery must not create a destination")
+
+    monkeypatch.setattr(activity_handler, "record_discovered_teams_channel", persist)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["eventType"] = "channelCreated"
+    activity.conversation.id = "team-1"
+    await activity_handler.handle_conversation_update(
+        SimpleNamespace(activity=activity), SimpleNamespace()
+    )
+    assert discovered == [{
+        "tenantId": "tenant-1", "teamId": "team-1", "teamName": "Operations",
+        "channelId": "channel-1", "channelName": "General",
+        "serviceUrl": "https://smba.trafficmanager.net/emea/", "available": True,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_channel_deleted_marks_discovery_unavailable(monkeypatch):
+    discovered = []
+
+    async def persist(payload):
+        discovered.append(payload)
+        return True
+
+    monkeypatch.setattr(activity_handler, "record_discovered_teams_channel", persist)
+    activity = sample_activity(with_metadata=True)
+    activity.channel_data["eventType"] = "channelDeleted"
+    activity.conversation.id = "team-1"
+    await activity_handler.handle_conversation_update(
+        SimpleNamespace(activity=activity), SimpleNamespace()
+    )
+    assert discovered[0]["available"] is False
+
+
+@pytest.mark.asyncio
 async def test_channel_created_never_attempts_resolution(monkeypatch, caplog):
     async def fail(**kwargs):
         raise RuntimeError("connector unavailable")
