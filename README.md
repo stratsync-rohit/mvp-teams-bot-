@@ -142,8 +142,8 @@ interrupt Teams activity processing.
 The Microsoft Agents SDK routes Teams `installationUpdate` activities through
 `AgentApplication.activity(ActivityTypes.installation_update)`:
 
-- `action: add` always registers the Team installation, but creates a channel
-  destination only when the payload contains an explicit `selectedChannel`.
+- `action: add` registers the Team installation only. Per-channel placement is
+  handled by the verified `channelMemberAdded` conversation event.
 - `action: remove` sends `tenantId` and the available `teamId` and/or
   `conversationId` to `POST /api/teams/installations/disconnect`.
 
@@ -167,22 +167,18 @@ repair that confirmed stale installation through the backend disconnect API.
 ## Channel destinations
 
 Team/app lifecycle and notification destinations are intentionally separate.
-Only an `installationUpdate/add` containing an explicit channel selection from
-the Teams installation UI registers a destination through the internal
-`POST /api/teams/channel-destinations` endpoint. The bot never supplies an
-`accountId`; the backend resolves tenant ownership. A `channelCreated` event is
-logged as discovery only and never calls Microsoft `create_conversation` or the
-destination endpoint. Other `conversationUpdate` activities may update Team
-installation metadata but never create a channel destination.
+Only a `conversationUpdate` whose `channelData.eventType` is
+`channelMemberAdded` and whose `membersAdded` contains the activity recipient
+(the bot) registers a destination through the internal
+`POST /api/teams/channel-destinations` endpoint. The incoming tenant, Team,
+channel, conversation ID, and service URL are used unchanged. This path never
+calls Microsoft `create_conversation`.
 
-The authoritative explicit-selection sources are
-`channelData.settings.selectedChannel.id` and
-`channelData.selectedChannel.id` (including SDK snake-case forms). If the
-selected-channel installation activity does not contain an exact routable
-channel conversation, the bot may call Microsoft `create_conversation` only
-after that explicit selection has been proven. A Team-level installation with
-no selected channel never creates a destination. General is supported when its
-explicit selected-channel ID equals the Team ID.
+A `channelCreated` event is logged as discovery only and never calls the
+destination endpoint. Generic conversation updates, human member additions,
+`teamMemberAdded`, and Team-level installation events do not create channel
+destinations. General is supported when explicit channel metadata names it even
+when its channel ID equals the Team ID.
 
 The `disconnect` command remains a backward-compatible fallback. Reconnecting
 from the StratSync UI re-enables the same destination record and does not require
@@ -297,14 +293,14 @@ are outside this repository:
    ```
 
 3. **Create/update the Teams app manifest** (`manifest.json`) with the bot
-   ID and required scopes (`team` scope, so it can be installed into a
-   Team), and package + upload/publish it to your tenant (Teams admin
-   center or org app catalog).
+   ID, `team` scope, `supportsChannelFeatures: tier1`, and the
+   `ChannelMember.Read.Group` application RSC permission, then package and
+   upload/publish it to your tenant.
 4. **Install the Teams app into the target Team/channel** - the bot registers
-   only an `installationUpdate/add` or `conversationUpdate` carrying a real
-   channel conversation where `conversation.id` equals the selected channel
-   ID. n8n must return the stored `tenantId`, `conversationId`, and `serviceUrl`
-   registered values in `POST /api/notifications` for proactive delivery.
+   only the bot-specific `channelMemberAdded` event carrying a real channel
+   conversation where `conversation.id` equals the channel ID. n8n must return
+   the stored `tenantId`, `conversationId`, and `serviceUrl` registered values
+   in `POST /api/notifications` for proactive delivery.
 5. **Grant the bot's Azure AD app the standard Bot Framework Connector
    permissions** (this is typically handled automatically by the Azure Bot
    resource registration).

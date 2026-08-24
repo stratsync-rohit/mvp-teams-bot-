@@ -433,7 +433,6 @@ async def test_team_level_install_does_not_register_team_as_channel(monkeypatch,
 
     assert calls == ["installation"]
     assert extract_teams_context(activity)["channelId"] is None
-    assert "teams_team_level_channel_registration_skipped" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -559,150 +558,144 @@ async def test_duplicate_channel_created_never_registers(monkeypatch):
     assert identities == []
 
 
+def channel_member_added_activity(
+    channel_id="channel-1", team_id="team-1", *, bot_added=True,
+    event_type="channelMemberAdded", channel_name="Risk Alerts",
+):
+    bot = SimpleNamespace(id="28:bot-app-id", name="StratSync")
+    member = bot if bot_added else SimpleNamespace(id="29:human-id", name="Human")
+    return SimpleNamespace(
+        type="conversationUpdate",
+        channel_data={
+            "tenant": {"id": "tenant-1"},
+            "team": {"id": team_id, "name": f"Team {team_id}"},
+            "channel": {"id": channel_id, "name": channel_name},
+            "eventType": event_type,
+        },
+        conversation=SimpleNamespace(
+            id=channel_id, tenant_id="tenant-1", conversation_type="channel"
+        ),
+        recipient=bot,
+        members_added=[member],
+        service_url="https://smba.trafficmanager.net/emea/",
+        from_property=None,
+    )
+
+
 @pytest.mark.asyncio
-async def test_explicit_selected_channel_resolves_route_when_conversation_is_team(monkeypatch):
+async def test_channel_member_added_with_bot_registers_incoming_route(monkeypatch, caplog):
+    captured = []
 
-    captured = {}
-
-    async def register_installation(activity):
+    async def installation(activity):
         return True
 
-    async def resolve(**kwargs):
-        captured["resolution"] = kwargs
-        return "resolved-channel-conversation"
-
-    async def register_destination(payload):
-        captured["payload"] = payload
+    async def register(payload):
+        captured.append(payload)
         return backend_client.DestinationRegistrationResult(True, 200, "destination-1")
 
+    async def must_not_resolve(**kwargs):
+        raise AssertionError("channelMemberAdded must use the incoming conversation")
+
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
     monkeypatch.setattr(
-        activity_handler, "register_installation_from_activity", register_installation
+        activity_handler.conversation_service, "resolve_channel_conversation",
+        must_not_resolve,
     )
-    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
-    monkeypatch.setattr(
-        activity_handler.conversation_service, "resolve_channel_conversation", resolve
-    )
-    activity = sample_activity()
-    activity.action = "add"
-    activity.channel_data["settings"] = {
-        "selectedChannel": {"id": "selected-channel", "name": "Selected"}
-    }
-    activity.conversation.id = "team-1"
-    await activity_handler.handle_installation_update(
-        SimpleNamespace(activity=activity), SimpleNamespace()
-    )
-
-    assert captured["resolution"]["channel_id"] == "selected-channel"
-    assert captured["payload"]["conversationId"] == "resolved-channel-conversation"
-    assert captured["payload"]["conversationResolutionSource"] == (
-        "microsoft_create_conversation"
-    )
-
-
-@pytest.mark.asyncio
-async def test_explicit_general_selection_allows_channel_id_equal_to_team(monkeypatch):
-    captured = []
-
-    async def register_installation(activity):
-        return True
-
-    async def register_destination(payload):
-        captured.append(payload)
-        return backend_client.DestinationRegistrationResult(True, 200, "general-destination")
-
-    monkeypatch.setattr(
-        activity_handler, "register_installation_from_activity", register_installation
-    )
-    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
-    activity = sample_activity()
-    activity.action = "add"
-    activity.channel_data["settings"] = {
-        "selectedChannel": {"id": "team-1", "name": "General"}
-    }
-    activity.conversation = SimpleNamespace(
-        id="team-1", tenant_id="tenant-1", conversation_type="channel"
-    )
-
-    await activity_handler.handle_installation_update(
-        SimpleNamespace(activity=activity), SimpleNamespace()
-    )
-
-    assert captured[0]["channelId"] == "team-1"
-    assert captured[0]["channelName"] == "General"
-
-
-@pytest.mark.asyncio
-async def test_installation_add_with_exact_selected_channel_registers(monkeypatch):
-    captured = []
-
-    async def register_installation(activity):
-        return True
-
-    async def register_destination(payload):
-        captured.append(payload)
-        return backend_client.DestinationRegistrationResult(
-            True, 200, "fresh-destination"
+    with caplog.at_level("INFO"):
+        await activity_handler.handle_channel_member_added(
+            SimpleNamespace(activity=channel_member_added_activity()), SimpleNamespace()
         )
 
-    monkeypatch.setattr(
-        activity_handler, "register_installation_from_activity", register_installation
-    )
-    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
-    activity = sample_activity()
-    activity.action = "add"
-    activity.channel_data["settings"] = {
-        "selectedChannel": {"id": "selected-channel", "name": "Selected"}
-    }
-    activity.conversation = SimpleNamespace(
-        id="selected-channel", tenant_id="tenant-1", conversation_type="channel"
-    )
-
-    await activity_handler.handle_installation_update(
-        SimpleNamespace(activity=activity), SimpleNamespace()
-    )
-
-    assert captured == [{
-        "tenantId": "tenant-1",
-        "teamId": "team-1",
-        "teamName": None,
-        "channelId": "selected-channel",
-        "channelName": "Selected",
-        "conversationId": "selected-channel",
-        "serviceUrl": "https://smba.trafficmanager.net/emea/",
-        "connectedByName": None,
-        "registrationTrigger": "installation_add",
-        "conversationResolutionSource": "incoming_activity",
-    }]
+    assert captured[0]["conversationId"] == "channel-1"
+    assert captured[0]["registrationTrigger"] == "channel_member_added"
+    assert captured[0]["conversationResolutionSource"] == "incoming_activity"
+    assert "teams_channel_member_added_received" in caplog.text
+    assert "teams_channel_member_added_bot_verified" in caplog.text
+    assert "teams_channel_destination_registered" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_duplicate_installation_adds_use_same_destination_identity(monkeypatch):
-    identities = []
-
-    async def register_installation(activity):
+@pytest.mark.parametrize(
+    "activity",
+    [
+        channel_member_added_activity(bot_added=False),
+        channel_member_added_activity(event_type="teamMemberAdded"),
+    ],
+    ids=["human-only", "team-member-added"],
+)
+async def test_non_bot_or_non_channel_member_event_does_not_register(
+    monkeypatch, activity, caplog
+):
+    async def installation(value):
         return True
 
-    async def register_destination(payload):
+    async def unexpected(payload):
+        raise AssertionError("non-authoritative member event must not register")
+
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
+    with caplog.at_level("INFO"):
+        await activity_handler.handle_channel_member_added(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+    assert "teams_channel_registration_skipped" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_channel_member_events_keep_stable_identity_and_multiple_scopes(monkeypatch):
+    identities = []
+
+    async def installation(activity):
+        return True
+
+    async def register(payload):
         identities.append(tuple(
             payload[field] for field in ("tenantId", "teamId", "channelId")
         ))
-        return backend_client.DestinationRegistrationResult(True, 200, "same-destination")
+        return backend_client.DestinationRegistrationResult(True, 200, "destination")
 
-    monkeypatch.setattr(
-        activity_handler, "register_installation_from_activity", register_installation
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    activities = [
+        channel_member_added_activity("channel-a", "team-a"),
+        channel_member_added_activity("channel-a", "team-a"),
+        channel_member_added_activity("channel-b", "team-a"),
+        channel_member_added_activity("channel-c", "team-b"),
+    ]
+    for activity in activities:
+        await activity_handler.handle_channel_member_added(
+            SimpleNamespace(activity=activity), SimpleNamespace()
+        )
+    assert identities == [
+        ("tenant-1", "team-a", "channel-a"),
+        ("tenant-1", "team-a", "channel-a"),
+        ("tenant-1", "team-a", "channel-b"),
+        ("tenant-1", "team-b", "channel-c"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_channel_member_added_allows_explicit_general_identity(monkeypatch):
+    captured = []
+
+    async def installation(activity):
+        return True
+
+    async def register(payload):
+        captured.append(payload)
+        return backend_client.DestinationRegistrationResult(True, 200, "general")
+
+    monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
+    monkeypatch.setattr(activity_handler, "register_teams_destination", register)
+    await activity_handler.handle_channel_member_added(
+        SimpleNamespace(activity=channel_member_added_activity(
+            "team-1", "team-1", channel_name="General"
+        )),
+        SimpleNamespace(),
     )
-    monkeypatch.setattr(activity_handler, "register_teams_destination", register_destination)
-    activity = sample_activity(with_metadata=True)
-    activity.action = "add"
-    activity.channel_data["settings"] = {
-        "selectedChannel": {"id": "channel-1", "name": "General"}
-    }
-    context = SimpleNamespace(activity=activity)
-
-    await activity_handler.handle_installation_update(context, SimpleNamespace())
-    await activity_handler.handle_installation_update(context, SimpleNamespace())
-
-    assert identities == [("tenant-1", "team-1", "channel-1")] * 2
+    assert captured[0]["channelId"] == "team-1"
+    assert captured[0]["conversationId"] == "team-1"
 
 
 @pytest.mark.asyncio

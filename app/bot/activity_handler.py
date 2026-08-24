@@ -45,7 +45,6 @@ from app.utils.teams_context import (
     channel_metadata_diagnostic,
     extract_teams_context,
     has_authoritative_channel_conversation,
-    resolve_explicit_selected_channel,
 )
 
 logger = get_logger(__name__)
@@ -345,94 +344,100 @@ async def handle_installation_update(context: TurnContext, state: TurnState) -> 
         await disconnect_installation_from_activity(context.activity)
     elif action == "add":
         await register_installation_from_activity(context.activity)
-        activity_context = extract_teams_context(context.activity)
-        selected_channel_id, selected_channel_name, selected_source = (
-            resolve_explicit_selected_channel(context.activity)
+
+
+def _activity_added_bot(activity) -> bool:
+    """Return whether Teams says the activity recipient joined the channel."""
+    recipient = getattr(activity, "recipient", None)
+    recipient_id = (
+        recipient.get("id") if isinstance(recipient, dict)
+        else getattr(recipient, "id", None)
+    )
+    if not recipient_id:
+        return False
+    for member in getattr(activity, "members_added", None) or []:
+        member_id = (
+            member.get("id") if isinstance(member, dict)
+            else getattr(member, "id", None)
         )
-        if not selected_channel_id:
-            log_event(
-                logger, "teams_team_level_channel_registration_skipped",
-                tenant_id=activity_context["tenantId"],
-                team_id=activity_context["teamId"],
-                conversation_id=activity_context["conversationId"],
-                trigger="installation_add",
-                reason="real_channel_metadata_missing",
-            )
-            return
+        if member_id == recipient_id:
+            return True
+    return False
 
-        safe_context = {
-            "trigger": "installation_add",
-            "tenant_id": activity_context["tenantId"],
-            "team_id": activity_context["teamId"],
-            "channel_id": selected_channel_id,
-            "channel_resolution_source": selected_source,
-            "source_conversation_id": activity_context["conversationId"],
-        }
-        if not all((activity_context["tenantId"], activity_context["teamId"],
-                    activity_context["serviceUrl"])):
-            log_event(logger, "teams_channel_auto_registration_skipped",
-                      skip_reason="explicit_channel_context_missing", **safe_context)
-            return
 
-        diagnostic = channel_metadata_diagnostic(context.activity)
-        conversation_id = activity_context["conversationId"]
-        resolution_source = "incoming_activity"
-        if not (
-            diagnostic["conversation_type"] == "channel"
-            and conversation_id == selected_channel_id
-        ):
-            resolution_source = "microsoft_create_conversation"
-            log_event(logger, "teams_channel_conversation_resolution_started",
-                      **safe_context)
-            try:
-                conversation_id = await conversation_service.resolve_channel_conversation(
-                    tenant_id=activity_context["tenantId"],
-                    team_id=activity_context["teamId"],
-                    channel_id=selected_channel_id,
-                    service_url=activity_context["serviceUrl"],
-                )
-            except Exception as exc:
-                log_event(logger, "teams_channel_conversation_resolution_failed", level=40,
-                          error_type=type(exc).__name__, **safe_context)
-                return
+async def handle_channel_member_added(
+    context: TurnContext, state: TurnState,
+) -> None:
+    """Register only a real channel route where Teams added this bot."""
+    activity = context.activity
+    diagnostic = channel_metadata_diagnostic(activity)
+    activity_context = extract_teams_context(activity)
+    event_type = (diagnostic["event_type"] or "").lower()
+    safe_context = {
+        "tenant_id": activity_context["tenantId"],
+        "team_id": activity_context["teamId"],
+        "channel_id": activity_context["channelId"],
+        "conversation_id": activity_context["conversationId"],
+        "event_type": diagnostic["event_type"],
+    }
+    log_event(logger, "teams_channel_member_added_received", **safe_context)
+    await register_installation_from_activity(activity)
 
-        payload = {
-            "tenantId": activity_context["tenantId"],
-            "teamId": activity_context["teamId"],
-            "teamName": activity_context["teamName"],
-            "channelId": selected_channel_id,
-            "channelName": selected_channel_name or activity_context["channelName"],
-            "conversationId": conversation_id,
-            "serviceUrl": activity_context["serviceUrl"],
-            "connectedByName": activity_context["connectedByName"],
-            "registrationTrigger": "installation_add",
-            "conversationResolutionSource": resolution_source,
-        }
-        try:
-            result = await register_teams_destination(payload)
-        except Exception as exc:
-            log_event(logger, "teams_channel_auto_registration_failed", level=40,
-                      error_type=type(exc).__name__, **safe_context)
-            return
-        if isinstance(result, bool):
-            result = DestinationRegistrationResult(result)
-        if result and result.enabled is not False:
-            await conversation_service.save_channel_context({
-                **activity_context,
-                "channelId": selected_channel_id,
-                "channelName": payload["channelName"],
-                "destinationConversationId": conversation_id,
-            })
-            log_event(logger, "teams_channel_auto_registered",
-                      destination_id=result.destination_id,
-                      backend_status=result.status_code, **safe_context)
-        else:
-            log_event(logger, "teams_channel_auto_registration_skipped",
-                      skip_reason=(getattr(result, "disconnect_reason", None)
-                                   or "backend_rejected"),
-                      destination_id=getattr(result, "destination_id", None),
-                      backend_status=getattr(result, "status_code", None),
-                      **safe_context)
+    if getattr(activity, "type", None) != ActivityTypes.conversation_update:
+        log_event(logger, "teams_channel_registration_skipped",
+                  reason="not_conversation_update", **safe_context)
+        return
+    if event_type != "channelmemberadded":
+        log_event(logger, "teams_channel_registration_skipped",
+                  reason="not_channel_member_added", **safe_context)
+        return
+    if not _activity_added_bot(activity):
+        log_event(logger, "teams_channel_registration_skipped",
+                  reason="added_member_is_not_bot", **safe_context)
+        return
+    log_event(logger, "teams_channel_member_added_bot_verified", **safe_context)
+
+    if not has_authoritative_channel_conversation(activity):
+        log_event(logger, "teams_channel_registration_skipped",
+                  reason="invalid_channel_conversation_context", **safe_context)
+        return
+
+    payload = {
+        "tenantId": activity_context["tenantId"],
+        "teamId": activity_context["teamId"],
+        "teamName": activity_context["teamName"],
+        "channelId": activity_context["channelId"],
+        "channelName": activity_context["channelName"],
+        "conversationId": activity_context["conversationId"],
+        "serviceUrl": activity_context["serviceUrl"],
+        "connectedByName": activity_context["connectedByName"],
+        "registrationTrigger": "channel_member_added",
+        "conversationResolutionSource": "incoming_activity",
+    }
+    try:
+        result = await register_teams_destination(payload)
+    except Exception as exc:
+        log_event(logger, "teams_channel_registration_skipped", level=40,
+                  reason="backend_exception", error_type=type(exc).__name__,
+                  **safe_context)
+        return
+    if isinstance(result, bool):
+        result = DestinationRegistrationResult(result)
+    if result and result.enabled is not False:
+        await conversation_service.save_channel_context({
+            **activity_context,
+            "destinationConversationId": activity_context["conversationId"],
+        })
+        log_event(logger, "teams_channel_destination_registered",
+                  destination_id=result.destination_id,
+                  backend_status=result.status_code, **safe_context)
+        return
+    log_event(
+        logger, "teams_channel_registration_skipped",
+        reason=(getattr(result, "disconnect_reason", None) or "backend_rejected"),
+        destination_id=getattr(result, "destination_id", None),
+        backend_status=getattr(result, "status_code", None), **safe_context,
+    )
 
 
 async def handle_conversation_update(context: TurnContext, state: TurnState) -> None:
@@ -488,6 +493,10 @@ def register_handlers() -> None:
     @agent_app.activity(ActivityTypes.installation_update)
     async def on_installation_update(context: TurnContext, state: TurnState) -> None:
         await handle_installation_update(context, state)
+
+    @agent_app.conversation_update("channelMemberAdded")
+    async def on_channel_member_added(context: TurnContext, state: TurnState) -> None:
+        await handle_channel_member_added(context, state)
 
     @agent_app.activity(ActivityTypes.conversation_update)
     async def on_conversation_update(context: TurnContext, state: TurnState) -> None:
