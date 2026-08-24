@@ -155,8 +155,17 @@ and the lifecycle activity's `from` account (`id`, `name`, `aadObjectId`). The
 stored `connectedBy*` fields describe the actor Teams attached to that
 connection event; they do not imply administrator, account-owner, or current
 logged-in-user status. Teams may omit channel names and actor details for some
-installation scopes, in which case these fields remain null and no Microsoft
-Graph lookup or fabricated fallback is used.
+installation scopes, in which case these fields remain null.
+
+For discovery events that omit `channelData.team.name`, the backend first uses
+cached Team metadata and then asks the bot's internal resolver for the
+authoritative display name. The resolver uses Microsoft Graph with the existing
+bot app credentials, preferring `channelData.team.aadGroupId` (`GET /groups`)
+and falling back to the explicit `team.id` (`GET /teams`). It never constructs a
+name from an ID. The Entra app therefore needs application permission
+`GroupMember.Read.All` for group lookup and `Team.ReadBasic.All` for the Team-ID
+fallback, with admin consent. A lookup failure leaves the name null and does not
+interrupt channel discovery.
 Disconnect requests require `INTERNAL_API_KEY`. If it is missing, the bot logs a
 safe failure and does not make an unauthenticated lifecycle request. Backend
 errors and already-disconnected responses do not crash Teams activity handling.

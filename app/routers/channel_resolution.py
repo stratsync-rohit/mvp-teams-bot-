@@ -1,4 +1,5 @@
-"""Internal endpoint for resolving a proactive Teams channel route."""
+"""Internal endpoints for resolving proactive Teams metadata and routes."""
+import httpx
 from fastapi import APIRouter, Header
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,49 @@ class ChannelResolutionRequest(BaseModel):
     serviceUrl: str = Field(min_length=1)
 
 
+class TeamNameResolutionRequest(BaseModel):
+    tenantId: str = Field(min_length=1)
+    teamId: str = Field(min_length=1)
+    aadGroupId: str | None = None
+
+
+async def resolve_microsoft_team_name(payload: TeamNameResolutionRequest) -> str | None:
+    """Resolve authoritative display metadata with the bot's app credentials."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.teams_credentials_configured:
+        return None
+    async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+        token_response = await client.post(
+            f"https://login.microsoftonline.com/{payload.tenantId}/oauth2/v2.0/token",
+            data={
+                "client_id": settings.MICROSOFT_APP_ID,
+                "client_secret": settings.MICROSOFT_APP_PASSWORD,
+                "scope": "https://graph.microsoft.com/.default",
+                "grant_type": "client_credentials",
+            },
+        )
+        token_response.raise_for_status()
+        token = token_response.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        # aadGroupId is the authoritative Entra group object ID and is preferred.
+        if payload.aadGroupId:
+            response = await client.get(
+                f"https://graph.microsoft.com/v1.0/groups/{payload.aadGroupId}",
+                params={"$select": "displayName"}, headers=headers,
+            )
+            if response.status_code != 404:
+                response.raise_for_status()
+                return response.json().get("displayName")
+        response = await client.get(
+            f"https://graph.microsoft.com/v1.0/teams/{payload.teamId}",
+            params={"$select": "displayName"}, headers=headers,
+        )
+        response.raise_for_status()
+        return response.json().get("displayName")
+
+
 @router.post("/api/internal/teams/resolve-channel-conversation")
 async def resolve_channel_conversation(
     payload: ChannelResolutionRequest,
@@ -26,3 +70,16 @@ async def resolve_channel_conversation(
         channel_id=payload.channelId, service_url=payload.serviceUrl,
     )
     return {"conversationId": conversation_id}
+
+
+@router.post("/api/internal/teams/resolve-team-name")
+async def resolve_team_name(
+    payload: TeamNameResolutionRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> dict:
+    _verify_internal_api_key(x_internal_api_key)
+    try:
+        team_name = await resolve_microsoft_team_name(payload)
+    except (httpx.HTTPError, KeyError, ValueError):
+        team_name = None
+    return {"teamName": team_name}

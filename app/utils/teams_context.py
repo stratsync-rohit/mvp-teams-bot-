@@ -235,6 +235,7 @@ def extract_teams_context(activity: Any) -> dict[str, Any]:
         "conversationId": _value(conversation, "id"),
         "serviceUrl": _first_value(activity, "service_url", "serviceUrl"),
         "teamName": _value(team, "name"),
+        "aadGroupId": _first_value(team, "aad_group_id", "aadGroupId"),
         "channelName": channel_name,
         # This is the actor attached to the lifecycle activity.  When Teams
         # supplies it, it represents the user who triggered this connection

@@ -104,6 +104,7 @@ def test_extract_teams_context_uses_optional_values():
         "conversationId": "conversation-1",
         "serviceUrl": "https://smba.trafficmanager.net/emea/",
         "teamName": None,
+        "aadGroupId": None,
         "channelName": None,
         "connectedByName": None,
         "connectedById": None,
@@ -635,6 +636,7 @@ async def test_channel_created_persists_discovery_without_destination(monkeypatc
     )
     assert discovered == [{
         "tenantId": "tenant-1", "teamId": "team-1", "teamName": "Operations",
+        "aadGroupId": None,
         "channelId": "channel-1", "channelName": "General",
         "serviceUrl": "https://smba.trafficmanager.net/emea/", "available": True,
     }]
