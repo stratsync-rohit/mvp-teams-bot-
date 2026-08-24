@@ -603,10 +603,11 @@ async def test_channel_member_added_with_bot_registers_incoming_route(monkeypatc
         must_not_resolve,
     )
     with caplog.at_level("INFO"):
-        await activity_handler.handle_channel_member_added(
+        await activity_handler.handle_conversation_update(
             SimpleNamespace(activity=channel_member_added_activity()), SimpleNamespace()
         )
 
+    assert len(captured) == 1
     assert captured[0]["conversationId"] == "channel-1"
     assert captured[0]["registrationTrigger"] == "channel_member_added"
     assert captured[0]["conversationResolutionSource"] == "incoming_activity"
@@ -636,10 +637,29 @@ async def test_non_bot_or_non_channel_member_event_does_not_register(
     monkeypatch.setattr(activity_handler, "register_installation_from_activity", installation)
     monkeypatch.setattr(activity_handler, "register_teams_destination", unexpected)
     with caplog.at_level("INFO"):
-        await activity_handler.handle_channel_member_added(
+        await activity_handler.handle_conversation_update(
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
-    assert "teams_channel_registration_skipped" in caplog.text
+    assert "teams_conversation_update_received" in caplog.text
+    if activity.channel_data["eventType"] == "channelMemberAdded":
+        assert "teams_channel_registration_skipped" in caplog.text
+
+
+def test_plain_dict_conversation_update_diagnostic_has_required_safe_fields():
+    activity = channel_member_added_activity()
+
+    assert activity_handler._conversation_update_diagnostic(activity) == {
+        "activity_type": "conversationUpdate",
+        "event_type": "channelMemberAdded",
+        "channel_data_runtime_type": "dict",
+        "conversation_id": "channel-1",
+        "conversation_type": "channel",
+        "channel_id": "channel-1",
+        "channel_name": "Risk Alerts",
+        "team_id": "team-1",
+        "members_added_ids": ["28:bot-app-id"],
+        "recipient_id": "28:bot-app-id",
+    }
 
 
 @pytest.mark.asyncio
@@ -664,7 +684,7 @@ async def test_channel_member_events_keep_stable_identity_and_multiple_scopes(mo
         channel_member_added_activity("channel-c", "team-b"),
     ]
     for activity in activities:
-        await activity_handler.handle_channel_member_added(
+        await activity_handler.handle_conversation_update(
             SimpleNamespace(activity=activity), SimpleNamespace()
         )
     assert identities == [

@@ -365,6 +365,44 @@ def _activity_added_bot(activity) -> bool:
     return False
 
 
+def _conversation_update_diagnostic(activity) -> dict:
+    """Return the temporary, non-secret diagnostics needed for Teams events."""
+    channel_data = getattr(activity, "channel_data", None) or {}
+
+    def value(source, *names):
+        for name in names:
+            item = (
+                source.get(name) if isinstance(source, dict)
+                else getattr(source, name, None)
+            )
+            if item is not None:
+                return item
+        return None
+
+    channel = value(channel_data, "channel") or {}
+    team = value(channel_data, "team") or {}
+    conversation = getattr(activity, "conversation", None)
+    recipient = getattr(activity, "recipient", None)
+    member_ids = [
+        value(member, "id")
+        for member in (getattr(activity, "members_added", None) or [])
+    ]
+    return {
+        "activity_type": getattr(activity, "type", None),
+        "event_type": value(channel_data, "event_type", "eventType"),
+        "channel_data_runtime_type": type(channel_data).__name__,
+        "conversation_id": value(conversation, "id"),
+        "conversation_type": value(
+            conversation, "conversation_type", "conversationType"
+        ),
+        "channel_id": value(channel, "id"),
+        "channel_name": value(channel, "name"),
+        "team_id": value(team, "id"),
+        "members_added_ids": member_ids,
+        "recipient_id": value(recipient, "id"),
+    }
+
+
 async def handle_channel_member_added(
     context: TurnContext, state: TurnState,
 ) -> None:
@@ -441,10 +479,15 @@ async def handle_channel_member_added(
 
 
 async def handle_conversation_update(context: TurnContext, state: TurnState) -> None:
-    """Capture Team installation metadata; channel updates are discovery only."""
+    """Safely route Teams conversation updates without SDK subtype selectors."""
+    activity = context.activity
+    raw_diagnostic = _conversation_update_diagnostic(activity)
+    log_event(logger, "teams_conversation_update_received", **raw_diagnostic)
+
     diagnostic = channel_metadata_diagnostic(context.activity)
     activity_context = extract_teams_context(context.activity)
-    if (diagnostic["event_type"] or "").lower() == "channelcreated":
+    event_type = (diagnostic["event_type"] or "").lower()
+    if event_type == "channelcreated":
         log_event(
             logger, "teams_channel_discovered_not_connected",
             tenant_id=activity_context["tenantId"],
@@ -456,7 +499,15 @@ async def handle_conversation_update(context: TurnContext, state: TurnState) -> 
             reason="explicit_channel_install_required",
         )
         return
-    await register_installation_from_activity(context.activity)
+
+    if event_type == "channelmemberadded":
+        await handle_channel_member_added(context, state)
+        return
+
+    # Team-scoped member/lifecycle conversation updates may refresh installation
+    # metadata, but only the verified channelMemberAdded path can create a
+    # destination.
+    await register_installation_from_activity(activity)
 
     log_event(
         logger,
@@ -493,10 +544,6 @@ def register_handlers() -> None:
     @agent_app.activity(ActivityTypes.installation_update)
     async def on_installation_update(context: TurnContext, state: TurnState) -> None:
         await handle_installation_update(context, state)
-
-    @agent_app.conversation_update("channelMemberAdded")
-    async def on_channel_member_added(context: TurnContext, state: TurnState) -> None:
-        await handle_channel_member_added(context, state)
 
     @agent_app.activity(ActivityTypes.conversation_update)
     async def on_conversation_update(context: TurnContext, state: TurnState) -> None:
