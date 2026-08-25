@@ -28,6 +28,7 @@ from app.storage.conversation_store import (
     conversation_store,
 )
 from app.utils.logger import get_logger, log_event
+from app.utils.service_url import validate_service_url
 from app.utils.teams_context import (
     extract_teams_context,
     has_authoritative_channel_conversation,
@@ -72,7 +73,7 @@ class ConversationService:
 
         log_event(
             logger,
-            "Captured Teams channel conversation reference",
+            "teams_conversation_reference_captured",
             team_id=team_id,
             channel_id=channel_id,
             tenant_id=tenant_id,
@@ -91,7 +92,7 @@ class ConversationService:
         await self._store.save(reference)
         log_event(
             logger,
-            "Captured Teams channel conversation reference",
+            "teams_conversation_reference_captured",
             tenant_id=reference.tenant_id,
             team_id=reference.team_id,
             channel_id=reference.channel_id,
@@ -112,6 +113,7 @@ class ConversationService:
         service_url: str,
     ) -> str:
         """Create a real Teams channel thread and return Microsoft's route ID."""
+        service_url = validate_service_url(service_url)
         settings = get_settings()
         resolved_conversation_id: str | None = None
 

@@ -41,7 +41,6 @@ _SAFE_FIELDS = (
     "correlation_id",
     "destination_id",
     "activity_type",
-    "raw_text",
     "normalized_command",
     "service_url_present",
     "error_type",
@@ -51,6 +50,14 @@ _SAFE_FIELDS = (
     "has_channel_name",
     "conversation_type",
     "resolution_source",
+    "event_type",
+    "activity_id",
+    "card_type",
+    "reason",
+    "retryable",
+    "returned_count",
+    "discovered_count",
+    "failed_count",
 )
 
 

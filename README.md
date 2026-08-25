@@ -2,7 +2,9 @@
 
 Microsoft Teams communication layer for the Risk Notification System.
 
-> Full architecture, API, operations, security, troubleshooting, and handover documentation is available in [`docs/README.md`](docs/README.md).
+> Full current architecture and production-readiness documentation is in
+> [`TEAMS_BOT_FULL_DOCUMENTATION.md`](TEAMS_BOT_FULL_DOCUMENTATION.md). The
+> split reference guides remain under [`docs-bot/`](docs-bot/README.md).
 
 This service is **only** the Teams messaging layer:
 
@@ -37,15 +39,15 @@ teams-bot/
 │   ├── config.py                  Settings + Microsoft 365 Agents SDK auth config
 │   ├── bot/
 │   │   ├── teams_bot.py           CloudAdapter + AgentApplication singletons
-│   │   ├── activity_handler.py    installationUpdate, conversationUpdate, actions
+│   │   ├── activity_handler.py    Thin SDK activity routing/lifecycle branching
 │   │   └── proactive_sender.py    Proactive send-to-channel
 │   ├── cards/                     Adaptive Card renderers (one per card type)
-│   ├── routers/                   health.py, notifications.py
-│   ├── services/                  notification_service.py, n8n_service.py,
-│   │                              conversation_service.py
-│   ├── schemas/                   Pydantic models (notifications.py, actions.py)
+│   ├── routers/                   health, notifications, channel resolution
+│   ├── services/                  Lifecycle/discovery, conversations,
+│   │                              notifications, backend and n8n clients
+│   ├── schemas/                   HTTP and integration Pydantic contracts
 │   ├── storage/                   conversation_store.py, idempotency_store.py
-│   └── utils/logger.py
+│   └── utils/                     Teams parsing, service URL/auth, safe logging
 ├── tests/
 ├── requirements.txt
 ├── Dockerfile
@@ -119,6 +121,8 @@ Notes:
 - If `INTERNAL_API_KEY` is set, `POST /api/notifications` requires a
   matching `X-Internal-API-Key` header. If left blank, the endpoint is open
   (intended for local development only).
+- When `APP_ENV=production`, startup fails unless `INTERNAL_API_KEY` is set,
+  so internal bot and backend routes fail closed in production.
 
 ## Shared-bot client onboarding
 
@@ -142,8 +146,8 @@ interrupt Teams activity processing.
 The Microsoft Agents SDK routes Teams `installationUpdate` activities through
 `AgentApplication.activity(ActivityTypes.installation_update)`:
 
-- `action: add` registers the Team installation only. Per-channel placement is
-  handled by the verified `channelMemberAdded` conversation event.
+- `action: add` registers the Team installation, enumerates existing channels,
+  and records any valid explicitly selected channel as discovery state only.
 - `action: remove` sends `tenantId` and the available `teamId` and/or
   `conversationId` to `POST /api/teams/installations/disconnect`.
 
@@ -157,24 +161,29 @@ connection event; they do not imply administrator, account-owner, or current
 logged-in-user status. Teams may omit channel names and actor details for some
 installation scopes, in which case these fields remain null.
 
-For discovery events that omit `channelData.team.name`, the backend first uses
-cached Team metadata and then asks the bot's internal resolver for the
-authoritative display name. The resolver uses Microsoft Graph with the existing
-bot app credentials, preferring `channelData.team.aadGroupId` (`GET /groups`)
-and falling back to the explicit `team.id` (`GET /teams`). It never constructs a
-name from an ID. The Entra app therefore needs application permission
-`GroupMember.Read.All` for group lookup and `Team.ReadBasic.All` for the Team-ID
-fallback, plus `Channel.ReadBasic.All` for installed-Team channel reconciliation,
-all with admin consent. `ChannelMember.Read.Group` is not used. A lookup failure leaves the name null and does not
-interrupt channel discovery.
+For discovery events that omit `channelData.team.name`, the backend uses only
+local trusted metadata from the installation, previously discovered channels,
+or an existing destination. A later Bot Framework activity containing the Team
+name backfills older discovered channels for that canonical Team identity.
 
-After an installation is persisted, the bot asks the backend to synchronize the
-installed Team. The backend calls the bot's credentialed Graph proxy, lists
-`GET /teams/{teamId}/channels?$select=id,displayName,membershipType`, and upserts
-standard channels as available discovery records. Private and shared channels
-are skipped. The same reconciliation is available through
-`POST /api/teams/channels/{accountId}/sync`; normal channel-list GET requests do
-not call Graph.
+After a trusted Team installation is persisted, the bot calls the Microsoft 365
+Agents SDK's `TeamsInfo.get_team_channels(context, team_id)`. That supported API
+uses the Teams Bot Framework connector to enumerate the Team's current channels.
+Each result is upserted through `POST /api/teams/channels/discover` as available
+discovery state only; no destination is created and the user must still click
+Connect. Event-driven discovery remains active for later channel changes and
+messages. This flow requires no directory API permissions or administrator
+consent. `POST /api/teams/channels/{accountId}/sync` is retained for frontend
+compatibility as a successful local no-op; normal channel-list GET requests are
+also database-only.
+
+Connector `serviceUrl` values are validated centrally before conversation
+creation or proactive delivery. They must use HTTPS with a real hostname;
+localhost, local-only names, embedded credentials, and private/local IP
+literals are rejected. Microsoft uses multiple regional connector hostnames, so
+this is intentionally not a brittle single-host allowlist; production egress
+policy remains the final protection against DNS-based redirection.
+
 Disconnect requests require `INTERNAL_API_KEY`. If it is missing, the bot logs a
 safe failure and does not make an unauthenticated lifecycle request. Backend
 errors and already-disconnected responses do not crash Teams activity handling.
@@ -185,32 +194,34 @@ repair that confirmed stale installation through the backend disconnect API.
 ## Channel destinations
 
 Team/app lifecycle and notification destinations are intentionally separate.
-Only a `conversationUpdate` whose `channelData.eventType` is
-`channelMemberAdded` and whose `membersAdded` contains the activity recipient
-(the bot) registers a destination through the internal
-`POST /api/teams/channel-destinations` endpoint. The incoming tenant, Team,
-channel, conversation ID, and service URL are used unchanged. This path never
-calls Microsoft `create_conversation`.
+No Teams lifecycle event registers a notification destination. A verified
+`channelMemberAdded` event refreshes the Team installation and discovers the
+exact authoritative channel, but remains Available until a StratSync user
+clicks Connect.
 
 A `channelCreated` event is logged as discovery only and never calls the
-destination endpoint. Generic conversation updates, human member additions,
-`teamMemberAdded`, and Team-level installation events do not create channel
-destinations. General is supported when explicit channel metadata names it even
-when its channel ID equals the Team ID.
+destination endpoint. Generic conversation updates, member events, selected
+channel installation events, and Team-level installation events do not create
+channel destinations. General is supported when explicit channel metadata names
+it even when its channel ID equals the Team ID.
 
 The `disconnect` command remains a backward-compatible fallback. Reconnecting
 from the StratSync UI re-enables the same destination record and does not require
 a Teams reinstall. Lifecycle discovery never reactivates a manually disconnected
 destination. Personal/group chats and channel remove/delete events are rejected.
 
-Without Microsoft Graph, the bot cannot enumerate every channel that existed
-before installation unless Microsoft Teams sends an authoritative
-channel-specific event for that channel.
+The installation enumeration fills the historical-event gap for channels that
+already existed before the bot was installed. The General channel is accepted
+when its connector channel ID equals the Team ID; if that exact enumeration
+shape omits its name, it is normalized to `General`. Other unnamed results are
+not persisted as fake channels.
 
 The channel name comes from `channelData.channel.name`, then
 `conversation.name` only for `conversationType=channel`, otherwise it remains
 null. A Team-level activity without a channel ID does not create a destination.
-Repeated connections are safe backend upserts. Team uninstall disables all
+Only `POST /api/teams/channels/{accountId}/connect` resolves a Microsoft
+conversation and creates or re-enables a destination. Repeated explicit
+connections are safe backend upserts. Team uninstall disables all
 destinations for that Team; the explicit channel `disconnect` command disables
 only the channel from which it was sent.
 
@@ -310,15 +321,16 @@ are outside this repository:
    https://YOUR-DOMAIN/api/messages
    ```
 
-3. **Create/update the Teams app manifest** (`manifest.json`) with the bot
-   ID, `team` scope, `supportsChannelFeatures: tier1`, and the
-   `ChannelMember.Read.Group` application RSC permission, then package and
-   upload/publish it to your tenant.
-4. **Install the Teams app into the target Team/channel** - the bot registers
-   only the bot-specific `channelMemberAdded` event carrying a real channel
-   conversation where `conversation.id` equals the channel ID. n8n must return
-   the stored `tenantId`, `conversationId`, and `serviceUrl` registered values
-   in `POST /api/notifications` for proactive delivery.
+3. **Create/update the Teams app manifest** (`manifest.json`) with the bot ID,
+   `team` scope, and `supportsChannelFeatures: tier1`, then package and
+   upload/publish it. Runtime discovery uses the Teams connector and requires
+   no Microsoft Graph permissions.
+4. **Install the Teams app into the target Team.** Installation enumerates
+   existing channels as Available; later authoritative Teams events discover
+   new channels. A StratSync user must explicitly click Connect before a
+   notification destination is created or re-enabled. n8n must return the
+   connected destination's `tenantId`, `conversationId`, and `serviceUrl` in
+   `POST /api/notifications` for proactive delivery.
 5. **Grant the bot's Azure AD app the standard Bot Framework Connector
    permissions** (this is typically handled automatically by the Azure Bot
    resource registration).
@@ -351,5 +363,5 @@ Verify live lifecycle activity without exposing secrets:
 
 ```bash
 docker logs -f risk-teams-bot 2>&1 | grep --line-buffered -E \
-  'teams_channel_auto_registration_(started|failed|skipped)|teams_channel_auto_registered|teams_app_removal_received|teams_installation_(received|registered|disconnect_)'
+  'teams_channel_(enumeration|discovered|discovery)|teams_app_removal_received|teams_installation_(registered|disconnect_)|teams_notification_sent'
 ```

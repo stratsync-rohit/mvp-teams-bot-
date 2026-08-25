@@ -20,6 +20,7 @@ below, rather than forcing the nested naming convention onto the .env file.
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +57,12 @@ class Settings(BaseSettings):
 
     # ---- Logging ----
     LOG_LEVEL: str = "INFO"
+
+    @model_validator(mode="after")
+    def require_production_internal_key(self):
+        if self.APP_ENV.lower() == "production" and not self.INTERNAL_API_KEY:
+            raise ValueError("INTERNAL_API_KEY is required when APP_ENV=production")
+        return self
 
     @property
     def is_development(self) -> bool:

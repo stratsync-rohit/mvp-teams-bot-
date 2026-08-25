@@ -3,8 +3,8 @@ n8n Action Handler client.
 
 Forwards riskId + actionKey + actor + destination (constructed from a
 Teams Adaptive Card Action.Execute activity) to n8n's Action Handler
-workflow via HTTP. This bot never talks to MongoDB or the backend
-directly - n8n owns that orchestration.
+workflow via HTTP. Risk persistence/orchestration remains outside this service;
+separate Teams lifecycle operations communicate with the backend.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class N8nService:
         if not webhook_url:
             log_event(
                 logger,
-                "N8N_ACTION_WEBHOOK_URL is not configured; skipping forward",
+                "n8n_action_webhook_not_configured",
                 level=30,
                 event_id=event.event_id,
                 risk_id=event.risk_id,
@@ -58,7 +58,7 @@ class N8nService:
         except httpx.TimeoutException as exc:
             log_event(
                 logger,
-                "n8n action webhook timed out",
+                "n8n_action_webhook_timed_out",
                 level=40,
                 event_id=event.event_id,
                 risk_id=event.risk_id,
@@ -68,7 +68,7 @@ class N8nService:
         except httpx.HTTPError as exc:
             log_event(
                 logger,
-                "n8n action webhook network failure",
+                "n8n_action_webhook_network_failed",
                 level=40,
                 event_id=event.event_id,
                 risk_id=event.risk_id,
@@ -79,7 +79,7 @@ class N8nService:
         if response.status_code >= 300:
             log_event(
                 logger,
-                "n8n action webhook returned non-2xx",
+                "n8n_action_webhook_rejected",
                 level=40,
                 event_id=event.event_id,
                 risk_id=event.risk_id,
@@ -92,7 +92,7 @@ class N8nService:
 
         log_event(
             logger,
-            "n8n action webhook call succeeded",
+            "n8n_action_webhook_succeeded",
             event_id=event.event_id,
             risk_id=event.risk_id,
             action_key=event.action_key,

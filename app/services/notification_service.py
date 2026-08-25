@@ -43,7 +43,12 @@ class TeamsSendError(Exception):
 
 def classify_teams_error(exc: Exception) -> tuple[str, bool]:
     """Normalize SDK failures conservatively without returning raw responses."""
-    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    response = getattr(exc, "response", None)
+    status = (
+        getattr(exc, "status_code", None)
+        or getattr(exc, "status", None)
+        or getattr(response, "status_code", None)
+    )
     text = str(exc).lower()
     if status == 429:
         return "rate_limited", True
@@ -73,7 +78,11 @@ def render_action_result_card(result: ActionResult) -> dict[str, Any]:
     """Dispatch a standardized backend result to its isolated card renderer."""
     builder = _CARD_BUILDERS.get(result.card_type)
     if builder is None:
-        log_event(logger, "Unsupported action-result card type", card_type=result.card_type)
+        log_event(
+            logger,
+            "teams_notification_card_unsupported",
+            card_type=result.card_type,
+        )
         raise UnsupportedCardTypeError(f"Unsupported cardType: {result.card_type}")
 
     # riskId belongs to the result envelope. Supplying it as a renderer fallback
@@ -145,7 +154,7 @@ class NotificationService:
         destination_id: str | None = None,
     ) -> None:
         try:
-            message_id = await send_to_conversation(
+            await send_to_conversation(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 service_url=service_url,
@@ -160,7 +169,7 @@ class NotificationService:
         except Exception as exc:  # noqa: BLE001 - normalize any Teams send failure
             log_event(
                 logger,
-                "Microsoft Teams send failure",
+                "teams_notification_send_failed",
                 level=40,
                 event_id=event_id,
                 risk_id=risk_id,
@@ -171,16 +180,7 @@ class NotificationService:
             code, retryable = classify_teams_error(exc)
             raise TeamsSendError(code, retryable) from exc
 
-        log_event(
-            logger,
-            "Adaptive Card sent",
-            event_id=event_id,
-            risk_id=risk_id,
-            team_id=team_id,
-            channel_id=channel_id,
-            conversation_id=conversation_id,
-            message_id=message_id,
-        )
+        # The proactive sender emits the single teams_notification_sent event.
 
 
 notification_service = NotificationService()

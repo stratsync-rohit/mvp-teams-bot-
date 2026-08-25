@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 import uuid
 from typing import Union
 
@@ -10,7 +9,6 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import ValidationError
 
 from app.bot.proactive_sender import ChannelNotRegisteredError
-from app.config import get_settings
 from app.schemas.notifications import (
     ActionResultPayload,
     InitialNotificationPayload,
@@ -22,25 +20,15 @@ from app.services.notification_service import (
     notification_service,
 )
 from app.utils.logger import get_logger, log_event
+from app.utils.internal_auth import verify_internal_api_key
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
 def _verify_internal_api_key(provided_key: str | None) -> None:
-    settings = get_settings()
-    expected_key = settings.INTERNAL_API_KEY
-
-    if not expected_key:
-        # No key configured - allowed only because this is meant purely
-        # for local/dev use (see README / .env.example).
-        return
-
-    if not provided_key or not hmac.compare_digest(provided_key, expected_key):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-Internal-API-Key",
-        )
+    """Compatibility wrapper for the shared internal-route authentication."""
+    verify_internal_api_key(provided_key)
 
 
 def _parse_payload(body: dict) -> Union[InitialNotificationPayload, ActionResultPayload]:
@@ -73,7 +61,7 @@ async def receive_notification(
     correlation_id = x_correlation_id or payload.event_id or str(uuid.uuid4())
     log_event(
         logger,
-        "Received notification from n8n",
+        "teams_notification_received",
         event_id=payload.event_id,
         risk_id=payload.risk_id,
         correlation_id=correlation_id,

@@ -68,9 +68,11 @@ def installation_update_diagnostic(activity: Any) -> dict[str, Any]:
     }
 
 
-def extract_explicit_install_channel(activity: Any) -> dict[str, Any] | None:
+def extract_explicit_install_channel(
+    activity: Any, *, context: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     """Extract a user-selected installation channel, never a Team-only route."""
-    context = extract_teams_context(activity)
+    context = context or extract_teams_context(activity)
     channel_data = _first_value(activity, "channel_data", "channelData") or {}
     settings = _value(channel_data, "settings") or {}
     selected_in_settings = _first_value(settings, "selected_channel", "selectedChannel")
@@ -130,11 +132,12 @@ def channel_metadata_diagnostic(activity: Any) -> dict[str, Any]:
     )
     channel_name = _value(channel, "name") or _value(selected_channel, "name")
     conversation_name = _value(conversation, "name")
+    channel_id, channel_resolution_source = resolve_authoritative_channel(activity)
     resolution_source = None
     if channel_name:
         resolution_source = "channelData.channel.name"
     elif (
-        resolve_authoritative_channel(activity)[0]
+        channel_id
         and conversation_type in (None, "channel")
         and conversation_name
     ):
@@ -148,7 +151,7 @@ def channel_metadata_diagnostic(activity: Any) -> dict[str, Any]:
         "conversation_type": conversation_type,
         "resolution_source": resolution_source,
         "event_type": _first_value(channel_data, "event_type", "eventType"),
-        "channel_resolution_source": resolve_authoritative_channel(activity)[1],
+        "channel_resolution_source": channel_resolution_source,
     }
 
 
@@ -187,10 +190,15 @@ def resolve_authoritative_channel(activity: Any) -> tuple[Any, str | None]:
     )
 
 
-def has_authoritative_channel_conversation(activity: Any) -> bool:
+def has_authoritative_channel_conversation(
+    activity: Any,
+    *,
+    context: dict[str, Any] | None = None,
+    diagnostic: dict[str, Any] | None = None,
+) -> bool:
     """True only for the channel identity shape proven by an incoming activity."""
-    context = extract_teams_context(activity)
-    diagnostic = channel_metadata_diagnostic(activity)
+    context = context or extract_teams_context(activity)
+    diagnostic = diagnostic or channel_metadata_diagnostic(activity)
     return bool(
         context["tenantId"]
         and context["teamId"]
@@ -244,4 +252,55 @@ def extract_teams_context(activity: Any) -> dict[str, Any]:
         "connectedById": _value(actor, "id"),
         "connectedByAadObjectId": _value(actor, "aad_object_id")
         or _value(actor, "aadObjectId"),
+    }
+
+
+def safe_activity_log_fields(activity: Any) -> dict[str, Any]:
+    """Return an allowlisted activity envelope without message/card content."""
+    context = extract_teams_context(activity)
+    channel_data = _first_value(activity, "channel_data", "channelData") or {}
+    return {
+        "activity_type": _value(activity, "type"),
+        "event_type": _first_value(channel_data, "event_type", "eventType"),
+        "activity_id": _value(activity, "id"),
+        "tenant_id": context["tenantId"],
+        "team_id": context["teamId"],
+        "channel_id": context["channelId"],
+        "conversation_id": context["conversationId"],
+    }
+
+
+def activity_added_recipient(activity: Any) -> bool:
+    """Return whether an activity says its recipient joined the channel."""
+    recipient = _value(activity, "recipient")
+    recipient_id = _value(recipient, "id")
+    if not recipient_id:
+        return False
+    return any(
+        _value(member, "id") == recipient_id
+        for member in (_first_value(activity, "members_added", "membersAdded") or [])
+    )
+
+
+def conversation_update_diagnostic(activity: Any) -> dict[str, Any]:
+    """Return non-secret structural diagnostics for conversation updates."""
+    channel_data = _first_value(activity, "channel_data", "channelData") or {}
+    channel = _value(channel_data, "channel") or {}
+    team = _value(channel_data, "team") or {}
+    conversation = _value(activity, "conversation")
+    recipient = _value(activity, "recipient")
+    members_added = _first_value(activity, "members_added", "membersAdded") or []
+    return {
+        "activity_type": _value(activity, "type"),
+        "event_type": _first_value(channel_data, "event_type", "eventType"),
+        "channel_data_runtime_type": type(channel_data).__name__,
+        "conversation_id": _value(conversation, "id"),
+        "conversation_type": _first_value(
+            conversation, "conversation_type", "conversationType"
+        ),
+        "channel_id": _value(channel, "id"),
+        "channel_name": _value(channel, "name"),
+        "team_id": _value(team, "id"),
+        "members_added_ids": [_value(member, "id") for member in members_added],
+        "recipient_id": _value(recipient, "id"),
     }

@@ -1,6 +1,7 @@
 """Small HTTP client for synchronizing Teams installations with the backend."""
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 import httpx
 
@@ -10,6 +11,44 @@ from app.utils.logger import get_logger, log_event
 logger = get_logger(__name__)
 
 TeamsDisconnectResult = Literal["disconnected", "not_found", "failed"]
+_shared_client: httpx.AsyncClient | None = None
+
+
+def start_backend_http_client() -> None:
+    """Create the process-wide backend client owned by the app lifespan."""
+    global _shared_client
+    if _shared_client is not None:
+        return
+    settings = get_settings()
+    headers = (
+        {"X-Internal-API-Key": settings.INTERNAL_API_KEY}
+        if settings.INTERNAL_API_KEY
+        else {}
+    )
+    _shared_client = httpx.AsyncClient(
+        timeout=settings.BACKEND_TIMEOUT_SECONDS,
+        headers=headers,
+    )
+
+
+async def close_backend_http_client() -> None:
+    """Close and clear the lifespan-owned backend client."""
+    global _shared_client
+    if _shared_client is None:
+        return
+    client, _shared_client = _shared_client, None
+    await client.aclose()
+
+
+@asynccontextmanager
+async def _backend_client() -> AsyncIterator[httpx.AsyncClient]:
+    """Reuse the lifespan client, with an isolated fallback for unit callers."""
+    if _shared_client is not None:
+        yield _shared_client
+        return
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+        yield client
 
 
 @dataclass(frozen=True)
@@ -33,7 +72,7 @@ async def register_teams_installation(payload: dict[str, Any]) -> str | bool:
 
     url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/installations"
     try:
-        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+        async with _backend_client() as client:
             response = await client.post(url, json=payload, headers=headers)
             if response.status_code == 409:
                 log_event(
@@ -50,7 +89,7 @@ async def register_teams_installation(payload: dict[str, Any]) -> str | bool:
     except (httpx.HTTPError, ValueError) as exc:
         log_event(
             logger,
-            "Teams installation registration failed",
+            "teams_installation_registration_failed",
             level=40,
             tenant_id=payload.get("tenantId"),
             team_id=payload.get("teamId"),
@@ -59,23 +98,6 @@ async def register_teams_installation(payload: dict[str, Any]) -> str | bool:
         )
         return False
     return (body.get("installation") or {}).get("accountId") or True
-
-
-async def sync_teams_channels(account_id: str) -> bool:
-    settings = get_settings()
-    headers = {"X-Internal-API-Key": settings.INTERNAL_API_KEY} if settings.INTERNAL_API_KEY else {}
-    try:
-        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/channels/{account_id}/sync",
-                headers=headers,
-            )
-            response.raise_for_status()
-    except (httpx.HTTPError, ValueError) as exc:
-        log_event(logger, "teams_channel_sync_failed", level=40,
-                  account_id=account_id, error_type=type(exc).__name__)
-        return False
-    return True
 
 
 async def register_teams_destination(
@@ -88,7 +110,7 @@ async def register_teams_destination(
         headers["X-Internal-API-Key"] = settings.INTERNAL_API_KEY
     url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/channel-destinations"
     try:
-        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+        async with _backend_client() as client:
             response = await client.post(url, json=payload, headers=headers)
             log_event(
                 logger,
@@ -144,7 +166,7 @@ async def record_discovered_teams_channel(payload: dict[str, Any]) -> bool:
     headers = {"X-Internal-API-Key": settings.INTERNAL_API_KEY} if settings.INTERNAL_API_KEY else {}
     url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/channels/discover"
     try:
-        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+        async with _backend_client() as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
     except (httpx.HTTPError, ValueError) as exc:
@@ -204,7 +226,7 @@ async def disconnect_teams_installation(
 
     url = f"{settings.BACKEND_BASE_URL.rstrip('/')}/api/teams/installations/disconnect"
     try:
-        async with httpx.AsyncClient(timeout=settings.BACKEND_TIMEOUT_SECONDS) as client:
+        async with _backend_client() as client:
             response = await client.post(
                 url,
                 json=payload,

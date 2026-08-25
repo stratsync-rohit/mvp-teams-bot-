@@ -18,6 +18,7 @@ from app.bot.teams_bot import adapter
 from app.cards.common import to_attachment
 from app.config import get_settings
 from app.utils.logger import get_logger, log_event
+from app.utils.service_url import validate_service_url
 
 logger = get_logger(__name__)
 
@@ -37,6 +38,7 @@ async def send_to_conversation(
     destination_id: str | None = None,
 ) -> str:
     """Send a card into a Teams-provided conversation reference."""
+    service_url = validate_service_url(service_url)
     settings = get_settings()
     message_activity = Activity(
         type=ActivityTypes.message,
@@ -71,9 +73,13 @@ async def send_to_conversation(
 
     log_event(
         logger,
-        "Sent Adaptive Card to Teams conversation",
+        "teams_notification_sent",
         tenant_id=tenant_id,
+        team_id=team_id,
+        channel_id=channel_id,
         conversation_id=conversation_id,
+        event_id=event_id,
+        destination_id=destination_id,
         message_id=new_activity_id,
     )
 

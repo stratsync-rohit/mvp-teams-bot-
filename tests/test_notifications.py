@@ -10,6 +10,7 @@ from app.bot.activity_handler import _extract_destination
 from app.schemas.actions import ActionActor, ActionDestination, RiskActionEvent
 from app.schemas.notifications import ActionResultPayload, InitialNotificationPayload
 from app.services.n8n_service import N8nActionWebhookError, N8nService
+from app.services.notification_service import classify_teams_error
 
 client = TestClient(app)
 
@@ -410,6 +411,13 @@ def test_notifications_normalizes_delivery_failures(
         "retryable": retryable,
     }
     assert "secret raw timeout" not in response.text
+
+
+def test_http_response_status_is_used_for_retry_classification():
+    request = httpx.Request("POST", "https://smba.example/")
+    response = httpx.Response(429, request=request)
+    error = httpx.HTTPStatusError("rate limited", request=request, response=response)
+    assert classify_teams_error(error) == ("rate_limited", True)
 
 
 def test_notifications_internal_api_key_required(monkeypatch):
